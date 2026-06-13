@@ -1,7 +1,6 @@
 """Tests for CandidateService — the two-hop search + filter + match logic."""
 
 from swiggy_deal_finder.candidates import CandidateService
-from swiggy_deal_finder.models import Portion
 from tests.fakes import WORK_ADDRESS_ID, FakeSwiggyClient
 
 
@@ -66,3 +65,68 @@ class TestCandidateServiceFind:
         assert len(hits) == 1
         assert hits[0].item_name == "Mutton Biryani"
         assert hits[0].base_price == 450
+
+
+class TestIngredientFilter:
+    async def test_ingredient_item_excluded_by_default(self):
+        """Idli Dosa Batter must never appear in results (ingredient denylist)."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        hits = await service.find("dosa", WORK_ADDRESS_ID)
+        item_names = [h.item_name for h in hits]
+        assert "Idli Dosa Batter" not in item_names
+        assert "Adai Dosa Mix" not in item_names
+
+    async def test_ingredient_item_excluded_with_portion_any(self):
+        """portion='any' disables portion filter but ingredient denylist still applies."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        hits = await service.find("dosa", WORK_ADDRESS_ID, portion="any")
+        item_names = [h.item_name for h in hits]
+        assert "Idli Dosa Batter" not in item_names
+        assert "Adai Dosa Mix" not in item_names
+
+    async def test_portion_regular_excludes_mini(self):
+        """portion='regular' (default) must exclude 'Mini Masala Dosa'."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        hits = await service.find("dosa", WORK_ADDRESS_ID, portion="regular")
+        item_names = [h.item_name for h in hits]
+        assert "Mini Masala Dosa" not in item_names
+
+    async def test_portion_any_includes_mini(self):
+        """portion='any' does not exclude mini items — querying 'mini dosa' returns
+        Mini Masala Dosa even without portion='mini'."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        # Query "mini dosa" with portion="any": Mini Masala Dosa is the only item
+        # matching both "mini" and "dosa" tokens, so it must be returned.
+        hits = await service.find("mini dosa", WORK_ADDRESS_ID, portion="any")
+        item_names = [h.item_name for h in hits]
+        assert "Mini Masala Dosa" in item_names
+
+    async def test_portion_mini_returns_only_mini_items(self):
+        """portion='mini' keeps ONLY items containing a shrink token."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        hits = await service.find("dosa", WORK_ADDRESS_ID, portion="mini")
+        item_names = [h.item_name for h in hits]
+        assert item_names == ["Mini Masala Dosa"]
+
+    async def test_specific_query_masala_dosa_matches_only_masala_dosa(self):
+        """Query 'masala dosa' must match Masala Dosa (and Mini Masala Dosa is excluded
+        by portion=regular). Plain Dosa and Ghee Dosa do not contain 'masala' token."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        hits = await service.find("masala dosa", WORK_ADDRESS_ID, portion="regular")
+        item_names = [h.item_name for h in hits]
+        assert item_names == ["Masala Dosa"]
+
+    async def test_query_with_mini_token_keeps_mini_items_under_regular(self):
+        """If user query contains 'mini', portion=regular still shows mini items
+        because the user explicitly asked for mini."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        hits = await service.find("mini dosa", WORK_ADDRESS_ID, portion="regular")
+        item_names = [h.item_name for h in hits]
+        assert "Mini Masala Dosa" in item_names
