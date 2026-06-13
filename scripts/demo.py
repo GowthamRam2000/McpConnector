@@ -21,11 +21,12 @@ WORK_ADDRESS_ID = "cug4elpnnp0lq52vuk10"
 async def main() -> None:
     dish = sys.argv[1] if len(sys.argv) > 1 else "biryani"
     top_n = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+    address_id = sys.argv[3] if len(sys.argv) > 3 else WORK_ADDRESS_ID
 
     async with LiveSwiggyClient() as client:
         finder = DealFinder(client)
-        print(f"Finding cheapest '{dish}' near Work (pricing top {top_n})...\n")
-        options = await finder.find_deals(dish, WORK_ADDRESS_ID, top_n=top_n)
+        print(f"Finding cheapest '{dish}' at {address_id} (pricing top {top_n})...\n")
+        options = await finder.find_deals(dish, address_id, top_n=top_n)
         if not options:
             print("No deals found.")
             return

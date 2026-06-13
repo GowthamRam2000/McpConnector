@@ -80,25 +80,32 @@ def parse_restaurants(raw: list[dict[str, Any]]) -> list[Restaurant]:
     """
     results: list[Restaurant] = []
     for entry in raw:
-        availability_status = entry.get("availabilityStatus")
-        if availability_status is not None:
-            # Live MCP returns a string: "OPEN", "CLOSED", or "UNAVAILABLE"
-            is_open: bool = availability_status == "OPEN"
-        else:
-            availability = entry.get("availability", {}) or {}
-            # opened key may be missing; default True per documented assumption
-            is_open = bool(availability.get("opened", True))
-        avg_rating_raw = entry.get("avgRating")
-        avg_rating: float | None = float(avg_rating_raw) if avg_rating_raw is not None else None
-        results.append(
-            Restaurant(
-                id=str(entry["id"]),
-                name=str(entry["name"]),
-                distance_km=float(entry["distanceKm"]),
-                avg_rating=avg_rating,
-                is_open=is_open,
+        try:
+            availability_status = entry.get("availabilityStatus")
+            if availability_status is not None:
+                # Live MCP returns a string: "OPEN", "CLOSED", or "UNAVAILABLE"
+                is_open: bool = availability_status == "OPEN"
+            else:
+                availability = entry.get("availability", {}) or {}
+                # opened key may be missing; default True per documented assumption
+                is_open = bool(availability.get("opened", True))
+            avg_rating_raw = entry.get("avgRating")
+            avg_rating: float | None = (
+                float(avg_rating_raw) if avg_rating_raw is not None else None
             )
-        )
+            results.append(
+                Restaurant(
+                    id=str(entry["id"]),
+                    name=str(entry["name"]),
+                    distance_km=float(entry["distanceKm"]),
+                    avg_rating=avg_rating,
+                    is_open=is_open,
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            # Skip an entry missing the fields we rank on (e.g. no distanceKm)
+            # rather than failing the whole search.
+            continue
     return results
 
 
@@ -109,15 +116,20 @@ def parse_menu_items(raw: list[dict[str, Any]]) -> list[MenuItem]:
     """
     results: list[MenuItem] = []
     for entry in raw:
-        in_stock = bool(int(entry.get("inStock", 1)))
-        results.append(
-            MenuItem(
-                id=str(entry["id"]),
-                name=str(entry["name"]),
-                price=int(entry["price"]),
-                in_stock=in_stock,
+        try:
+            in_stock = bool(int(entry.get("inStock", 1)))
+            results.append(
+                MenuItem(
+                    id=str(entry["id"]),
+                    name=str(entry["name"]),
+                    price=int(entry["price"]),
+                    in_stock=in_stock,
+                )
             )
-        )
+        except (KeyError, TypeError, ValueError):
+            # Skip an item without a usable id/name/price (e.g. variant-only items
+            # with no top-level price) rather than failing the whole menu parse.
+            continue
     return results
 
 

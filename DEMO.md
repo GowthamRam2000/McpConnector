@@ -19,17 +19,23 @@ code in the connector. No order is ever placed (discovery only).
 
 ## Wire it into Claude Desktop
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+Merge into `~/Library/Application Support/Claude/claude_desktop_config.json` (already
+applied on this machine). Use **absolute paths** — Claude Desktop launches MCP servers
+with a minimal PATH, so bare `uv`/`npx` won't resolve, and the server itself spawns
+`npx mcp-remote`. Adjust the paths if `which uv` / `which npx` differ on your machine.
 
 ```json
 {
   "mcpServers": {
     "swiggy-deal-finder": {
-      "command": "uv",
+      "command": "/Users/gowthamram/.local/bin/uv",
       "args": [
         "run", "--directory", "/Users/gowthamram/PycharmProjects/Swiggy",
         "python", "-m", "swiggy_deal_finder.server"
-      ]
+      ],
+      "env": {
+        "PATH": "/Users/gowthamram/.local/bin:/Users/gowthamram/.nvm/versions/node/v24.15.0/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+      }
     }
   }
 }

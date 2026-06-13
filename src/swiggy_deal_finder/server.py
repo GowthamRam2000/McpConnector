@@ -124,6 +124,11 @@ async def find_deals(dish: str, address_id: str, top_n: int = 5) -> str:
             "Please clear your cart in the Swiggy app and try again. "
             "Deal Finder needs an empty cart to probe prices accurately."
         )
+    except Exception as exc:  # noqa: BLE001 - surface a clean message, never a raw trace
+        return (
+            f"The deal search hit an unexpected error ({type(exc).__name__}). "
+            "Please try again in a moment."
+        )
     if not options:
         return (
             f"No results found for '{dish}' within 7 km of the selected address. "

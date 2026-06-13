@@ -142,6 +142,22 @@ class TestParseRestaurants:
     def test_empty_list(self):
         assert parse_restaurants([]) == []
 
+    def test_skips_entry_missing_distance(self):
+        """A restaurant without distanceKm must be skipped, not crash the whole search."""
+        raw = [
+            {"id": "1", "name": "No Distance", "avgRating": 4.0},  # missing distanceKm
+            {"id": "2", "name": "Good", "distanceKm": 1.5, "avgRating": 4.2},
+        ]
+        results = parse_restaurants(raw)
+        assert [r.id for r in results] == ["2"]
+
+    def test_skips_entry_with_null_distance(self):
+        raw = [
+            {"id": "1", "name": "Null Dist", "distanceKm": None, "avgRating": 4.0},
+            {"id": "2", "name": "Good", "distanceKm": 2.0},
+        ]
+        assert [r.id for r in parse_restaurants(raw)] == ["2"]
+
 
 class TestParseMenuItems:
     def test_basic_mapping(self):
@@ -167,3 +183,12 @@ class TestParseMenuItems:
 
     def test_empty_list(self):
         assert parse_menu_items([]) == []
+
+    def test_skips_item_missing_price(self):
+        """A variant-only item without a top-level price must be skipped, not crash."""
+        raw = [
+            {"id": "1", "name": "Dosa (variants only)"},  # missing price
+            {"id": "2", "name": "Masala Dosa", "price": 90, "inStock": 1},
+        ]
+        items = parse_menu_items(raw)
+        assert [m.id for m in items] == ["2"]
