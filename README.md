@@ -178,7 +178,7 @@ Tests in `tests/` cover:
 ## Troubleshooting
 
 - **`uv: command not found`**  
-  Install `uv` and ensure it is in your PATH.
+  Install `uv` from https://docs.astral.sh/uv/installation/ and ensure it is in your PATH.
 
 - **No results for a specific dish phrase**  
   Retry with a broader `category` (e.g. `dosa`, `biryani`, `roll`) and then match exact dish via menu scan.
