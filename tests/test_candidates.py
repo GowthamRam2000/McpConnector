@@ -130,3 +130,50 @@ class TestIngredientFilter:
         hits = await service.find("mini dosa", WORK_ADDRESS_ID, portion="regular")
         item_names = [h.item_name for h in hits]
         assert "Mini Masala Dosa" in item_names
+
+
+class TestListVariants:
+    async def test_returns_distinct_names_sorted(self):
+        """list_variants returns each distinct item name once, sorted alphabetically."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        variants = await service.list_variants("dosa", WORK_ADDRESS_ID)
+        names = [v[0] for v in variants]
+        assert names == sorted(names)
+        # No duplicates
+        assert len(names) == len(set(names))
+
+    async def test_excludes_ingredient_items(self):
+        """Ingredient denylist items (Batter, Mix) must not appear in variants."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        variants = await service.list_variants("dosa", WORK_ADDRESS_ID)
+        names = [v[0] for v in variants]
+        assert "Idli Dosa Batter" not in names
+        assert "Adai Dosa Mix" not in names
+
+    async def test_includes_mini_items(self):
+        """Mini items are NOT filtered out in list_variants (no portion filter)."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        variants = await service.list_variants("dosa", WORK_ADDRESS_ID)
+        names = [v[0] for v in variants]
+        assert "Mini Masala Dosa" in names
+
+    async def test_price_range_correct(self):
+        """Each variant carries the correct (min_price, max_price)."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        variants = await service.list_variants("dosa", WORK_ADDRESS_ID)
+        by_name = {v[0]: (v[1], v[2]) for v in variants}
+        # All items appear at a single restaurant so min==max
+        assert by_name["Plain Dosa"] == (50, 50)
+        assert by_name["Masala Dosa"] == (90, 90)
+        assert by_name["Ghee Dosa"] == (95, 95)
+        assert by_name["Mini Masala Dosa"] == (70, 70)
+
+    async def test_returns_empty_for_unknown_dish(self):
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        variants = await service.list_variants("sushi", WORK_ADDRESS_ID)
+        assert variants == []
