@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Secrets & local state — NEVER commit
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite3
+
+# Cloud / creds
+*-service-account*.json
+gha-creds-*.json
+
+# IDE
+.idea/
