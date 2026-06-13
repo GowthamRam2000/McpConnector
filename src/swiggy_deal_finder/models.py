@@ -1,0 +1,46 @@
+"""Domain models for Swiggy Deal Finder.
+
+All models are immutable (frozen) so they can be safely passed across async boundaries.
+"""
+
+from pydantic import BaseModel
+
+
+class Address(BaseModel, frozen=True):
+    id: str
+    label: str
+    line: str
+
+
+class Restaurant(BaseModel, frozen=True):
+    id: str
+    name: str
+    distance_km: float
+    # avgRating absent in some search results — default None
+    avg_rating: float | None
+    # is_open inferred from availability flags; default True when flag absent (optimistic;
+    # logged at call site so callers can warn if they want stricter behaviour)
+    is_open: bool
+
+
+class MenuItem(BaseModel, frozen=True):
+    id: str
+    name: str
+    # price in integer rupees (Swiggy always sends int; reject float to surface bad data)
+    price: int
+    # inStock comes as 0/1 from MCP; validator coerces via pydantic int→bool
+    in_stock: bool
+
+
+class DishHit(BaseModel, frozen=True):
+    restaurant: Restaurant
+    item_id: str
+    item_name: str
+    base_price: int
+
+
+class PricedOption(BaseModel, frozen=True):
+    hit: DishHit
+    coupon_code: str | None
+    coupon_discount: int
+    final_to_pay: int
