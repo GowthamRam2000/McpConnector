@@ -59,6 +59,7 @@ MENU_11111 = [
     MenuItem(id="d004", name="Mini Masala Dosa", price=70, in_stock=True),
     MenuItem(id="d005", name="Idli Dosa Batter", price=65, in_stock=True),
     MenuItem(id="d006", name="Adai Dosa Mix", price=76, in_stock=True),
+    MenuItem(id="d007", name="Ghee Roast", price=110, in_stock=True),
 ]
 
 # Menus keyed by restaurant_id
@@ -124,12 +125,22 @@ class FakeSwiggyClient:
         self._record("get_addresses")
         return list(ADDRESSES)
 
+    # Specific dish phrases that return no restaurants — mirrors live Swiggy dual-behavior:
+    # only broad category words return restaurant results; specific phrases return dish
+    # suggestions (dataless) which the parser drops, so we return [] here.
+    _SPECIFIC_PHRASES: frozenset[str] = frozenset(
+        {"ghee roast", "ghee dosa", "masala dosa", "roast"}
+    )
+
     async def search_restaurants(self, query: str, address_id: str) -> list[Restaurant]:
         self._record("search_restaurants", query, address_id)
-        q = query.lower()
+        q = query.lower().strip()
+        # Specific phrases yield no restaurants (live Swiggy returns dish-suggestions only)
+        if q in self._SPECIFIC_PHRASES:
+            return []
         if "biryani" in q or "briyani" in q:
             return list(BIRYANI_RESTAURANTS)
-        if "dosa" in q:
+        if q == "dosa":
             return list(DOSA_RESTAURANTS)
         return []
 

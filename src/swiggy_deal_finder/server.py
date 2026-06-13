@@ -95,7 +95,13 @@ async def get_locations() -> str:
 
 
 @mcp.tool()
-async def find_deals(dish: str, address_id: str, top_n: int = 5, portion: str = "regular") -> str:
+async def find_deals(
+    dish: str,
+    address_id: str,
+    top_n: int = 5,
+    portion: str = "regular",
+    category: str | None = None,
+) -> str:
     """Find the cheapest nearby Swiggy options for a dish after coupons are applied.
 
     Parameters
@@ -109,6 +115,16 @@ async def find_deals(dish: str, address_id: str, top_n: int = 5, portion: str = 
     portion:
         "regular" (default) for a normal portion; "mini" only if the user explicitly
         wants a small/mini size; "any" to disable the portion filter.
+    category:
+        The BROAD food category the dish belongs to — INFER it from the dish using your
+        own food knowledge (this works for ANY cuisine, not a fixed list). Examples:
+        "ghee roast"/"masala dosa" → "dosa"; "chicken biryani" → "biryani";
+        "margherita" → "pizza"; "butter chicken" → "north indian"; "california roll" → "sushi".
+        The Swiggy restaurant search only returns restaurants for such broad categories, so
+        ALWAYS set category to the dish's family when the dish itself is specific. If the
+        search returns nothing, infer a DIFFERENT plausible category or a synonym for the
+        dish (e.g. "frankie" → "roll"/"wrap", "curd rice" → "south indian") and call again
+        before telling the user it's unavailable.
 
     Returns a ranked table (cheapest first) with restaurant name, rating, distance,
     base price, best Swiggy coupon applied, and final amount to pay.
@@ -130,7 +146,7 @@ async def find_deals(dish: str, address_id: str, top_n: int = 5, portion: str = 
     finder = DealFinder(client)
     try:
         options = await finder.find_deals(
-            dish=dish, address_id=address_id, top_n=top_n, portion=portion
+            dish=dish, address_id=address_id, top_n=top_n, portion=portion, category=category
         )
     except CartNotEmptyError:
         return (
@@ -145,8 +161,10 @@ async def find_deals(dish: str, address_id: str, top_n: int = 5, portion: str = 
         )
     if not options:
         return (
-            f"No results found for '{dish}' within 7 km of the selected address. "
-            "Try a broader search term or a different address."
+            f"No results found for '{dish}' near this address. This usually means the "
+            "category was too narrow or off — try calling find_deals again with a "
+            "different `category` (the dish's broad food family) or a synonym for the "
+            "dish, or a different saved address, before concluding it's unavailable."
         )
 
     header = f"Top {len(options)} deals for '{dish}' (cheapest first after coupons):\n"
@@ -166,7 +184,11 @@ async def find_deals(dish: str, address_id: str, top_n: int = 5, portion: str = 
 
 
 @mcp.tool()
-async def list_dish_variants(dish: str, address_id: str) -> str:
+async def list_dish_variants(
+    dish: str,
+    address_id: str,
+    category: str | None = None,
+) -> str:
     """List the distinct variants of a dish available at nearby open restaurants.
 
     Use this BEFORE find_deals when the user's dish is generic or a family name
@@ -179,6 +201,16 @@ async def list_dish_variants(dish: str, address_id: str) -> str:
         Generic dish name to search for variants, e.g. "dosa", "biryani".
     address_id:
         The delivery address id from get_locations().
+    category:
+        The BROAD food category the dish belongs to — INFER it from the dish using your
+        own food knowledge (this works for ANY cuisine, not a fixed list). Examples:
+        "ghee roast"/"masala dosa" → "dosa"; "chicken biryani" → "biryani";
+        "margherita" → "pizza"; "butter chicken" → "north indian"; "california roll" → "sushi".
+        The Swiggy restaurant search only returns restaurants for such broad categories, so
+        ALWAYS set category to the dish's family when the dish itself is specific. If the
+        search returns nothing, infer a DIFFERENT plausible category or a synonym for the
+        dish (e.g. "frankie" → "roll"/"wrap", "curd rice" → "south indian") and call again
+        before telling the user it's unavailable.
 
     Returns a list of distinct dish variants with price ranges, ready to show the user.
     After showing this list, ask the user which specific variant to compare, then call
@@ -186,7 +218,7 @@ async def list_dish_variants(dish: str, address_id: str) -> str:
     """
     client = _require_client()
     service = CandidateService(client)
-    variants = await service.list_variants(dish, address_id)
+    variants = await service.list_variants(dish, address_id, category=category)
     if not variants:
         return (
             f"No variants found for '{dish}' within 7 km of the selected address. "

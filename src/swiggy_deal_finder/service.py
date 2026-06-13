@@ -34,6 +34,7 @@ class DealFinder:
         address_id: str,
         top_n: int = 5,
         portion: str = "regular",
+        category: str | None = None,
     ) -> list[PricedOption]:
         """Return up to top_n PricedOptions for dish, ranked cheapest-first.
 
@@ -45,6 +46,8 @@ class DealFinder:
 
         portion: "regular" (default) excludes shrink-sized items unless the query asks
         for them; "mini" keeps only shrink-sized items; "any" disables the portion filter.
+        category: broad food category for restaurant search (e.g. "dosa" for "ghee roast").
+        See CandidateService.find for details.
         """
         # Fail fast on a busy cart before doing any search/pricing work.
         cart = await self._client.get_food_cart(address_id)
@@ -53,7 +56,7 @@ class DealFinder:
                 "Swiggy cart is not empty. Clear your cart before running Deal Finder."
             )
 
-        hits = await self._candidates.find(dish, address_id, portion=portion)  # type: ignore[arg-type]
+        hits = await self._candidates.find(dish, address_id, portion=portion, category=category)  # type: ignore[arg-type]
 
         # Sort by base_price asc before slicing so we probe cheapest options first
         hits_sorted = sorted(hits, key=lambda h: h.base_price)

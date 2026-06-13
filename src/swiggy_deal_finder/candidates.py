@@ -1,8 +1,18 @@
 """CandidateService: two-hop Swiggy dish discovery.
 
-Flow: search_restaurants(dish) → filter ≤max_distance_km + open
-      → get_restaurant_menu per candidate → match dish tokens in item name
+Flow: _search_terms(dish, category) → try each term with search_restaurants
+      → filter ≤max_distance_km + open (stop at first term yielding ≥1 restaurant)
+      → get_restaurant_menu per candidate → match FULL dish tokens in item name
       → choose lowest-price match per restaurant → DishHit.
+
+Why _search_terms exists: Swiggy's search_restaurants is DUAL-BEHAVIOR.
+Broad category/cuisine words ("dosa", "biryani", "pizza") return real Restaurant
+objects with distanceKm/avgRating/availabilityStatus.  Specific dish phrases
+("ghee roast", "masala dosa") return dataless dish-suggestions that parse_restaurants
+drops, yielding 0 restaurants.  The fix: let the caller supply the broad `category`
+(e.g. "dosa" for "ghee roast") and use it as the search term, then match the full
+specific dish inside each restaurant's menu.  Last-token broadening is the automatic
+fallback when no category is supplied.
 
 Biryani/briyani: the spec-confirmed spelling variant handled by token normalisation
 (both "biryani" and "briyani" canonicalize to "biryani" before matching).
@@ -53,6 +63,37 @@ def _normalise(text: str) -> str:
     """Lowercase, strip, and canonicalise known spelling variants."""
     tokens = text.lower().strip().split()
     return " ".join(_SPELLING_VARIANTS.get(t, t) for t in tokens)
+
+
+def _search_terms(dish: str, category: str | None) -> list[str]:
+    """Return ordered, de-duplicated search terms to try with search_restaurants.
+
+    Priority:
+      1. category — if given; broad words are the only reliable way to get restaurants
+         back from Swiggy when the dish is a specific phrase (e.g. "ghee roast").
+      2. full dish — verbatim; works when the dish itself is a broad category word.
+      3. last token of dish — automatic broadening fallback; e.g. "masala dosa" → "dosa".
+         Omitted when it equals the full dish (single-word dish).
+
+    Duplicates are removed while preserving order.
+    """
+    seen: set[str] = set()
+    terms: list[str] = []
+
+    def _add(term: str) -> None:
+        t = term.strip()
+        if t and t not in seen:
+            seen.add(t)
+            terms.append(t)
+
+    if category:
+        _add(category)
+    _add(dish)
+    last_token = dish.strip().split()[-1] if dish.strip() else ""
+    if last_token != dish.strip():
+        _add(last_token)
+
+    return terms
 
 
 def _matches(query_tokens: list[str], item: MenuItem) -> bool:
@@ -134,6 +175,7 @@ class CandidateService:
         dish: str,
         address_id: str,
         portion: Portion = "regular",
+        category: str | None = None,
     ) -> list[DishHit]:
         """Return one DishHit per restaurant that has a matching, in-stock item.
 
@@ -143,14 +185,12 @@ class CandidateService:
         Applies ingredient denylist (always) and portion filter (controlled by
         `portion`): "regular" excludes shrink-sized items unless the query asks for
         them, "mini" keeps only shrink-sized items, "any" disables the portion filter.
-        """
-        restaurants = await self._client.search_restaurants(dish, address_id)
 
-        # Filter: distance and open status
-        reachable = [
-            r for r in restaurants
-            if r.distance_km <= self._max_distance_km and r.is_open
-        ]
+        category: broad food category for the restaurant search (e.g. "dosa" when
+        dish is "ghee roast").  When omitted, the full dish is tried first, then the
+        last token as a fallback.  See _search_terms for the full priority order.
+        """
+        reachable = await self._find_reachable(dish, address_id, category)
 
         query_normalised = _normalise(dish)
         query_tokens = query_normalised.split()
@@ -178,6 +218,7 @@ class CandidateService:
         self,
         dish: str,
         address_id: str,
+        category: str | None = None,
     ) -> list[tuple[str, int, int]]:
         """Return distinct dish variant names with min/max prices across restaurants.
 
@@ -185,12 +226,10 @@ class CandidateService:
         matching the dish tokens with the INGREDIENT DENYLIST applied (no portion filter
         — all sizes shown). Returns up to 20 distinct item names sorted alphabetically,
         each with (name, min_price, max_price).
+
+        category: broad food category for the restaurant search.  See find() for details.
         """
-        restaurants = await self._client.search_restaurants(dish, address_id)
-        reachable = [
-            r for r in restaurants
-            if r.distance_km <= self._max_distance_km and r.is_open
-        ]
+        reachable = await self._find_reachable(dish, address_id, category)
 
         query_normalised = _normalise(dish)
         query_tokens = query_normalised.split()
@@ -220,3 +259,24 @@ class CandidateService:
         ]
         results.sort(key=lambda t: t[0])
         return results[:20]
+
+    async def _find_reachable(
+        self,
+        dish: str,
+        address_id: str,
+        category: str | None,
+    ) -> list:
+        """Try each search term in priority order; return reachable restaurants from
+        the first term that yields ≥1 reachable (open + within distance) result.
+
+        Returns [] if no term yields any reachable restaurants.
+        """
+        for term in _search_terms(dish, category):
+            restaurants = await self._client.search_restaurants(term, address_id)
+            reachable = [
+                r for r in restaurants
+                if r.distance_km <= self._max_distance_km and r.is_open
+            ]
+            if reachable:
+                return reachable
+        return []

@@ -177,3 +177,68 @@ class TestListVariants:
         service = CandidateService(client)
         variants = await service.list_variants("sushi", WORK_ADDRESS_ID)
         assert variants == []
+
+
+class TestCategoryRouting:
+    """Tests for the search-term resolver and category-based restaurant routing."""
+
+    async def test_category_routes_ghee_roast_to_dosa_restaurants(self):
+        """find("ghee roast", category="dosa") must search "dosa", find Saravana Bhavan,
+        and return the Ghee Roast item from its menu."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        hits = await service.find("ghee roast", WORK_ADDRESS_ID, category="dosa")
+        assert len(hits) == 1
+        assert hits[0].item_name == "Ghee Roast"
+        assert hits[0].restaurant.id == "11111"
+
+    async def test_ghee_roast_without_category_returns_empty(self):
+        """find("ghee roast") with no category: "ghee roast"→[] and last token
+        "roast"→[] so no restaurants are found → []."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        hits = await service.find("ghee roast", WORK_ADDRESS_ID)
+        assert hits == []
+
+    async def test_auto_broaden_masala_dosa_via_last_token(self):
+        """find("masala dosa") with no category: "masala dosa"→[] then last token
+        "dosa"→DOSA_RESTAURANTS → menu match finds "Masala Dosa"."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        hits = await service.find("masala dosa", WORK_ADDRESS_ID)
+        item_names = [h.item_name for h in hits]
+        assert "Masala Dosa" in item_names
+
+    async def test_list_variants_with_category_surfaces_ghee_roast(self):
+        """list_variants("ghee roast", category="dosa") must surface "Ghee Roast"."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        variants = await service.list_variants("ghee roast", WORK_ADDRESS_ID, category="dosa")
+        names = [v[0] for v in variants]
+        assert "Ghee Roast" in names
+
+    async def test_category_used_first_in_search_terms(self):
+        """When category is given it must be the FIRST search term tried.
+        Verify by checking search_restaurants call order in client.calls."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        await service.find("ghee roast", WORK_ADDRESS_ID, category="dosa")
+        search_calls = [
+            c for c in client.calls if c[0] == "search_restaurants"
+        ]
+        # First search must be with the category "dosa", not the full dish
+        assert search_calls[0][1][0] == "dosa"
+
+    async def test_no_category_full_dish_tried_before_last_token(self):
+        """Without category, the full dish is tried first. "masala dosa" is a specific
+        phrase that yields [] so we fall back to "dosa" (last token)."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        await service.find("masala dosa", WORK_ADDRESS_ID)
+        search_calls = [
+            c for c in client.calls if c[0] == "search_restaurants"
+        ]
+        # First tried: "masala dosa" (specific phrase → [])
+        # Second tried: "dosa" (last token → restaurants)
+        assert search_calls[0][1][0] == "masala dosa"
+        assert search_calls[1][1][0] == "dosa"
