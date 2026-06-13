@@ -36,6 +36,7 @@ from contextlib import asynccontextmanager
 
 from mcp.server.fastmcp import FastMCP
 
+from swiggy_deal_finder.candidates import CandidateService
 from swiggy_deal_finder.live_client import LiveSwiggyClient
 from swiggy_deal_finder.pricing import CartNotEmptyError
 from swiggy_deal_finder.service import DealFinder
@@ -94,17 +95,20 @@ async def get_locations() -> str:
 
 
 @mcp.tool()
-async def find_deals(dish: str, address_id: str, top_n: int = 5) -> str:
+async def find_deals(dish: str, address_id: str, top_n: int = 5, portion: str = "regular") -> str:
     """Find the cheapest nearby Swiggy options for a dish after coupons are applied.
 
     Parameters
     ----------
     dish:
-        The dish to search for, e.g. "biryani", "chicken biryani", "masala dosa".
+        The dish to search for, e.g. "masala dosa", "chicken biryani".
     address_id:
         The delivery address id from get_locations(). Must be a valid saved address.
     top_n:
         How many candidates to price and return (default 5). Fewer → faster.
+    portion:
+        "regular" (default) for a normal portion; "mini" only if the user explicitly
+        wants a small/mini size; "any" to disable the portion filter.
 
     Returns a ranked table (cheapest first) with restaurant name, rating, distance,
     base price, best Swiggy coupon applied, and final amount to pay.
@@ -112,12 +116,22 @@ async def find_deals(dish: str, address_id: str, top_n: int = 5) -> str:
     Requires an EMPTY Swiggy cart. If your cart is not empty, this tool will tell
     you so — clear your cart in the Swiggy app and try again.
 
-    Typical flow: call get_locations() first → pick address_id → call find_deals().
+    IMPORTANT: compare like-for-like. If the user's dish is generic/ambiguous (a family
+    such as 'dosa', 'biryani', 'pizza', 'noodles') rather than a specific item, FIRST
+    call list_dish_variants(dish, address_id), show the user the variants, and ask which
+    specific one they want (including toppings, e.g. plain vs masala vs ghee dosa). Only
+    then call find_deals with that specific dish. Use portion='regular' (default) for a
+    normal portion, 'mini' only if the user explicitly wants a small/mini size.
+
+    Typical flow: call get_locations() first → pick address_id → for ambiguous dishes
+    call list_dish_variants() first → then call find_deals() with the specific variant.
     """
     client = _require_client()
     finder = DealFinder(client)
     try:
-        options = await finder.find_deals(dish=dish, address_id=address_id, top_n=top_n)
+        options = await finder.find_deals(
+            dish=dish, address_id=address_id, top_n=top_n, portion=portion
+        )
     except CartNotEmptyError:
         return (
             "Your Swiggy cart is not empty. "
@@ -149,6 +163,42 @@ async def find_deals(dish: str, address_id: str, top_n: int = 5) -> str:
             f"\n   Final to pay: ₹{opt.final_to_pay}\n"
         )
     return "\n".join(rows)
+
+
+@mcp.tool()
+async def list_dish_variants(dish: str, address_id: str) -> str:
+    """List the distinct variants of a dish available at nearby open restaurants.
+
+    Use this BEFORE find_deals when the user's dish is generic or a family name
+    (e.g. 'dosa', 'biryani', 'pizza', 'noodles'). Shows all variants with their
+    price range so the user can pick the specific one they want before pricing.
+
+    Parameters
+    ----------
+    dish:
+        Generic dish name to search for variants, e.g. "dosa", "biryani".
+    address_id:
+        The delivery address id from get_locations().
+
+    Returns a list of distinct dish variants with price ranges, ready to show the user.
+    After showing this list, ask the user which specific variant to compare, then call
+    find_deals with that specific dish name.
+    """
+    client = _require_client()
+    service = CandidateService(client)
+    variants = await service.list_variants(dish, address_id)
+    if not variants:
+        return (
+            f"No variants found for '{dish}' within 7 km of the selected address. "
+            "Try a broader search term or a different address."
+        )
+    lines = [f"Variants of '{dish}' available nearby:"]
+    for name, lo, hi in variants:
+        lines.append(f"  - {name}  (₹{lo}–{hi})")
+    lines.append(
+        "Ask the user which specific one to compare, then call find_deals with that name."
+    )
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":
