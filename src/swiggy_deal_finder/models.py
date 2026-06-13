@@ -3,7 +3,11 @@
 All models are immutable (frozen) so they can be safely passed across async boundaries.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel
+
+Portion = Literal["regular", "mini", "any"]
 
 
 class Address(BaseModel, frozen=True):

@@ -1,6 +1,7 @@
 """Tests for CandidateService — the two-hop search + filter + match logic."""
 
 from swiggy_deal_finder.candidates import CandidateService
+from swiggy_deal_finder.models import Portion
 from tests.fakes import WORK_ADDRESS_ID, FakeSwiggyClient
 
 
