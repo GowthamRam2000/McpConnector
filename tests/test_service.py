@@ -64,3 +64,14 @@ class TestDealFinder:
         finder = DealFinder(client)
         results = await finder.find_deals("sushi", WORK_ADDRESS_ID)
         assert results == []
+
+    async def test_portion_threaded_to_candidates(self):
+        """find_deals with portion='mini' should filter to mini items only.
+        With the dosa menu, portion='mini' returns only Mini Masala Dosa."""
+        client = FakeSwiggyClient()
+        finder = DealFinder(client)
+        # With portion='mini', only Mini Masala Dosa survives
+        results = await finder.find_deals("dosa", WORK_ADDRESS_ID, portion="mini")
+        # Mini Masala Dosa at price 70 should be the only hit
+        assert len(results) == 1
+        assert results[0].hit.item_name == "Mini Masala Dosa"

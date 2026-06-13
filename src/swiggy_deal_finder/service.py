@@ -33,6 +33,7 @@ class DealFinder:
         dish: str,
         address_id: str,
         top_n: int = 5,
+        portion: str = "regular",
     ) -> list[PricedOption]:
         """Return up to top_n PricedOptions for dish, ranked cheapest-first.
 
@@ -41,6 +42,9 @@ class DealFinder:
         returning a confusing empty result. Individual candidates that fail pricing
         with a transient error are skipped with a warning — a partial result beats a
         full abort.
+
+        portion: "regular" (default) excludes shrink-sized items unless the query asks
+        for them; "mini" keeps only shrink-sized items; "any" disables the portion filter.
         """
         # Fail fast on a busy cart before doing any search/pricing work.
         cart = await self._client.get_food_cart(address_id)
@@ -49,7 +53,7 @@ class DealFinder:
                 "Swiggy cart is not empty. Clear your cart before running Deal Finder."
             )
 
-        hits = await self._candidates.find(dish, address_id)
+        hits = await self._candidates.find(dish, address_id, portion=portion)  # type: ignore[arg-type]
 
         # Sort by base_price asc before slicing so we probe cheapest options first
         hits_sorted = sorted(hits, key=lambda h: h.base_price)
