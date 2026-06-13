@@ -42,6 +42,25 @@ RESTAURANT_CLOSED = Restaurant(
 
 BIRYANI_RESTAURANTS = [RESTAURANT_AMBUR, RESTAURANT_FAR, RESTAURANT_CLOSED]
 
+RESTAURANT_DOSA = Restaurant(
+    id="11111",
+    name="Saravana Bhavan",
+    distance_km=1.5,
+    avg_rating=4.6,
+    is_open=True,
+)
+
+DOSA_RESTAURANTS = [RESTAURANT_DOSA]
+
+MENU_11111 = [
+    MenuItem(id="d001", name="Plain Dosa", price=50, in_stock=True),
+    MenuItem(id="d002", name="Masala Dosa", price=90, in_stock=True),
+    MenuItem(id="d003", name="Ghee Dosa", price=95, in_stock=True),
+    MenuItem(id="d004", name="Mini Masala Dosa", price=70, in_stock=True),
+    MenuItem(id="d005", name="Idli Dosa Batter", price=65, in_stock=True),
+    MenuItem(id="d006", name="Adai Dosa Mix", price=76, in_stock=True),
+]
+
 # Menus keyed by restaurant_id
 MENU_62683 = [
     MenuItem(id="81574197", name="Chicken Briyani", price=350, in_stock=True),
@@ -49,6 +68,7 @@ MENU_62683 = [
 ]
 MENUS: dict[str, list[MenuItem]] = {
     "62683": MENU_62683,
+    "11111": MENU_11111,
 }
 
 # ── Cart state machine ──────────────────────────────────────────────────────────────────
@@ -106,10 +126,11 @@ class FakeSwiggyClient:
 
     async def search_restaurants(self, query: str, address_id: str) -> list[Restaurant]:
         self._record("search_restaurants", query, address_id)
-        # Return biryani fixtures for any query containing "biryani" or "briyani"
         q = query.lower()
         if "biryani" in q or "briyani" in q:
             return list(BIRYANI_RESTAURANTS)
+        if "dosa" in q:
+            return list(DOSA_RESTAURANTS)
         return []
 
     async def get_restaurant_menu(
