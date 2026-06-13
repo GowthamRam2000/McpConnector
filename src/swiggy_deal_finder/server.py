@@ -16,13 +16,11 @@ Typical flow for the orchestrating agent:
 
 Session management
 ------------------
-The shared LiveSwiggyClient is initialised lazily on the first tool call (via
-_get_client()) and reused for all subsequent calls.  Lazy init is chosen over a
-FastMCP lifespan because:
-  - mcp-remote triggers an OAuth browser flow on connect; we don't want that at
-    server startup before the user has done anything.
-  - The first tool call is the natural moment to authenticate: the user is already
-    present and can complete the OAuth prompt.
+One persistent LiveSwiggyClient (one mcp-remote subprocess + MCP session) is owned by
+the server lifespan, so connect()/aclose() run in the server's root anyio task. Doing
+this in a tool handler instead (lazy init) hangs under an MCP client, because the
+stdio_client task group must be entered and exited in the same task. OAuth therefore
+runs once at startup — the natural moment right after the user connects the connector.
 
 Run as a stdio MCP server::
 
@@ -33,24 +31,43 @@ Run as a stdio MCP server::
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from mcp.server.fastmcp import FastMCP
 
 from swiggy_deal_finder.live_client import LiveSwiggyClient
 from swiggy_deal_finder.pricing import CartNotEmptyError
 from swiggy_deal_finder.service import DealFinder
 
-mcp = FastMCP("swiggy-deal-finder")
-
-# Module-level singleton; initialised on first tool call.
+# The single Swiggy session, owned by the lifespan (one anyio task context).
 _client: LiveSwiggyClient | None = None
 
 
-async def _get_client() -> LiveSwiggyClient:
-    """Return the shared LiveSwiggyClient, connecting on first access."""
+@asynccontextmanager
+async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
+    """Connect one persistent Swiggy session at startup; close it at shutdown.
+
+    Entering/exiting the mcp-remote stdio session in the server's root task (here)
+    rather than in a tool handler avoids the anyio cross-task cancel-scope hang.
+    """
     global _client
+    _client = LiveSwiggyClient()
+    await _client.connect()
+    try:
+        yield
+    finally:
+        await _client.aclose()
+        _client = None
+
+
+mcp = FastMCP("swiggy-deal-finder", lifespan=_lifespan)
+
+
+def _require_client() -> LiveSwiggyClient:
+    """Return the lifespan-owned client, or error if the server isn't started."""
     if _client is None:
-        _client = LiveSwiggyClient()
-        await _client.connect()
+        raise RuntimeError("Swiggy session not initialised (lifespan not started).")
     return _client
 
 
@@ -65,7 +82,7 @@ async def get_locations() -> str:
     After showing this list, ask the user to confirm their preferred address_id
     before calling find_deals.
     """
-    client = await _get_client()
+    client = _require_client()
     addresses = await client.get_addresses()
     if not addresses:
         return "No saved addresses found. Please add a delivery address in the Swiggy app first."
@@ -97,7 +114,7 @@ async def find_deals(dish: str, address_id: str, top_n: int = 5) -> str:
 
     Typical flow: call get_locations() first → pick address_id → call find_deals().
     """
-    client = await _get_client()
+    client = _require_client()
     finder = DealFinder(client)
     try:
         options = await finder.find_deals(dish=dish, address_id=address_id, top_n=top_n)
