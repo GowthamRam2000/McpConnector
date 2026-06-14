@@ -1,7 +1,11 @@
 """Tests for CandidateService — the two-hop search + filter + match logic."""
 
 from swiggy_deal_finder.candidates import CandidateService
-from tests.fakes import WORK_ADDRESS_ID, FakeSwiggyClient
+from tests.fakes import (
+    DOSA_SUPERSET_PAGE0,
+    WORK_ADDRESS_ID,
+    FakeSwiggyClient,
+)
 
 
 class TestRatingFilter:
@@ -349,3 +353,286 @@ class TestPagination:
         # Only RESTAURANT_AMBUR passes the distance/open filter
         assert len(hits) == 1
         assert hits[0].restaurant.id == "62683"
+
+
+# ── Helpers shared across new test classes ───────────────────────────────────────────────
+
+class _SupersetDosaClient(FakeSwiggyClient):
+    """Serves DOSA_SUPERSET_PAGE0 (restaurants 33333, 44444) for query "dosa".
+
+    Restaurant 33333 (A2B) has both an exact "Ghee Dosa" and superset items.
+    Restaurant 44444 only has superset items (no exact "Ghee Dosa").
+    """
+
+    async def search_restaurants(self, query, address_id, offset=0):
+        self._record("search_restaurants", query, address_id, offset=offset)
+        q = query.lower().strip()
+        if q in self._SPECIFIC_PHRASES:
+            return []
+        if q == "dosa":
+            if offset == 0:
+                return list(DOSA_SUPERSET_PAGE0)
+            return []
+        return []
+
+
+# ── Change 1: Tight like-for-like matching in find() ────────────────────────────────────
+
+class TestTightMatching:
+    """find() uses tight matching; list_variants() stays loose."""
+
+    async def test_tight_match_excludes_superset_items(self):
+        """find("ghee dosa") with tight matching must NOT return "Ghee Podi Dosa"
+        or "Millet Ghee Karam Dosa" or "Nice Ghee Dosa" — these have extra meaningful
+        tokens beyond the query ("podi", "millet", "karam", "nice")."""
+        client = _SupersetDosaClient()
+        service = CandidateService(client)
+        hits = await service.find("ghee dosa", WORK_ADDRESS_ID, category="dosa")
+        item_names = [h.item_name for h in hits]
+        assert "Ghee Podi Dosa" not in item_names
+        assert "Millet Ghee Karam Dosa" not in item_names
+        assert "Nice Ghee Dosa" not in item_names
+
+    async def test_tight_match_includes_exact_item(self):
+        """find("ghee dosa") must include the exact "Ghee Dosa" item from restaurant 33333."""
+        client = _SupersetDosaClient()
+        service = CandidateService(client)
+        hits = await service.find("ghee dosa", WORK_ADDRESS_ID, category="dosa")
+        item_names = [h.item_name for h in hits]
+        # "Ghee Dosa" (exact) and "Ghee Dosa - Plain" ("plain" is a FILLER token) both qualify
+        assert any(n in ("Ghee Dosa", "Ghee Dosa - Plain") for n in item_names)
+
+    async def test_tight_match_allows_filler_tokens(self):
+        """Items with only FILLER tokens beyond the query are still tight matches.
+        "Ghee Dosa - Plain" → extra token "plain" is a FILLER → should be included."""
+        client = _SupersetDosaClient()
+        service = CandidateService(client)
+        hits = await service.find("ghee dosa", WORK_ADDRESS_ID, category="dosa")
+        item_names = [h.item_name for h in hits]
+        # The cheapest tight match wins per restaurant; "Ghee Dosa - Plain" (90) < "Ghee Dosa" (95)
+        assert "Ghee Dosa - Plain" in item_names
+
+    async def test_tight_match_only_restaurant_with_exact_returns_hit(self):
+        """Restaurant 44444 has NO exact ghee dosa (only supersets); tight matching means
+        it yields no hit when at least one other restaurant does have a tight match."""
+        client = _SupersetDosaClient()
+        service = CandidateService(client)
+        hits = await service.find("ghee dosa", WORK_ADDRESS_ID, category="dosa")
+        restaurant_ids = {h.restaurant.id for h in hits}
+        # 33333 has tight matches; 44444 does not → 44444 excluded when tight tier active
+        assert "44444" not in restaurant_ids
+        assert "33333" in restaurant_ids
+
+    async def test_loose_fallback_when_no_tight_match_anywhere(self):
+        """When NO restaurant has a tight match, fall back to loose matching so the user
+        still gets results rather than an empty list."""
+        from swiggy_deal_finder.models import MenuItem, Restaurant
+
+        class _NoExactClient(FakeSwiggyClient):
+            """Only superset items; no item whose tokens match exactly."""
+            async def search_restaurants(self, query, address_id, offset=0):
+                self._record("search_restaurants", query, address_id, offset=offset)
+                if query.lower().strip() == "dosa":
+                    if offset == 0:
+                        return [Restaurant(id="x1", name="Superset Only", distance_km=1.0,
+                                           avg_rating=4.0, is_open=True)]
+                    return []
+                return []
+
+            async def get_restaurant_menu(self, restaurant_id, address_id):
+                self._record("get_restaurant_menu", restaurant_id, address_id)
+                return [
+                    MenuItem(id="z1", name="Ghee Podi Dosa", price=110, in_stock=True),
+                    MenuItem(id="z2", name="Nice Ghee Dosa", price=98, in_stock=True),
+                ]
+
+        client = _NoExactClient()
+        service = CandidateService(client)
+        hits = await service.find("ghee dosa", WORK_ADDRESS_ID, category="dosa")
+        # Loose fallback: should return results (not empty), even though nothing is tight
+        assert len(hits) > 0
+
+    async def test_list_variants_still_returns_superset_names(self):
+        """list_variants() must stay LOOSE — it should include 'Ghee Podi Dosa',
+        'Nice Ghee Dosa', etc. alongside 'Ghee Dosa', so the user can see all variants."""
+        client = _SupersetDosaClient()
+        service = CandidateService(client)
+        variants = await service.list_variants("ghee dosa", WORK_ADDRESS_ID, category="dosa")
+        names = [v[0] for v in variants]
+        # Loose matching: all items whose name contains BOTH "ghee" and "dosa"
+        assert "Ghee Podi Dosa" in names
+        assert "Nice Ghee Dosa" in names
+        assert "Ghee Dosa" in names
+
+
+# ── Change 2: restaurant_name filter ────────────────────────────────────────────────────
+
+class TestRestaurantNameFilter:
+    """find() supports restaurant_name= to narrow results to one chain."""
+
+    async def test_restaurant_name_filters_to_matching_restaurant(self):
+        """find("ghee dosa", restaurant_name="a2b") returns only A2B's hit."""
+        client = _SupersetDosaClient()
+        service = CandidateService(client)
+        hits = await service.find(
+            "ghee dosa", WORK_ADDRESS_ID, category="dosa", restaurant_name="a2b"
+        )
+        # Only restaurant 33333 (A2B - Adyar Ananda Bhavan) passes the name filter
+        assert all(h.restaurant.id == "33333" for h in hits)
+        assert len(hits) > 0
+
+    async def test_restaurant_name_filter_is_case_insensitive(self):
+        """Matching is case-insensitive substring: "A2B" and "a2b" both match."""
+        client = _SupersetDosaClient()
+        service = CandidateService(client)
+        hits_upper = await service.find(
+            "ghee dosa", WORK_ADDRESS_ID, category="dosa", restaurant_name="A2B"
+        )
+        hits_lower = await service.find(
+            "ghee dosa", WORK_ADDRESS_ID, category="dosa", restaurant_name="a2b"
+        )
+        assert {h.restaurant.id for h in hits_upper} == {h.restaurant.id for h in hits_lower}
+
+    async def test_restaurant_name_filter_skips_menu_for_non_matching(self):
+        """Menus for restaurants that don't match restaurant_name must NOT be fetched."""
+        client = _SupersetDosaClient()
+        service = CandidateService(client)
+        await service.find(
+            "ghee dosa", WORK_ADDRESS_ID, category="dosa", restaurant_name="a2b"
+        )
+        menu_calls = [c for c in client.calls if c[0] == "get_restaurant_menu"]
+        fetched_ids = {c[1][0] for c in menu_calls}
+        # Restaurant 44444 (Sri Murugan) must NOT have been fetched
+        assert "44444" not in fetched_ids
+        assert "33333" in fetched_ids
+
+    async def test_restaurant_name_filter_no_match_returns_empty(self):
+        """If no restaurant matches restaurant_name, return []."""
+        client = _SupersetDosaClient()
+        service = CandidateService(client)
+        hits = await service.find(
+            "ghee dosa", WORK_ADDRESS_ID, category="dosa", restaurant_name="zzznomatch"
+        )
+        assert hits == []
+
+    async def test_restaurant_name_none_returns_all(self):
+        """restaurant_name=None (default) does not filter any restaurant."""
+        client = _SupersetDosaClient()
+        service = CandidateService(client)
+        hits_default = await service.find("ghee dosa", WORK_ADDRESS_ID, category="dosa")
+        hits_none = await service.find(
+            "ghee dosa", WORK_ADDRESS_ID, category="dosa", restaurant_name=None
+        )
+        assert {h.restaurant.id for h in hits_default} == {h.restaurant.id for h in hits_none}
+
+
+# ── Change 3: Parallel menu fetches ─────────────────────────────────────────────────────
+
+class TestParallelMenuFetch:
+    """Menu fetches run concurrently; correctness must be preserved."""
+
+    async def test_concurrent_fetch_returns_same_hits_as_sequential(self):
+        """gather-based fetch must produce the same hits as the old sequential approach.
+        Use the default dosa fixture (two pages → two restaurants with ghee roast)."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        hits = await service.find("ghee roast", WORK_ADDRESS_ID, category="dosa")
+        restaurant_ids = {h.restaurant.id for h in hits}
+        # Both restaurants (11111, 22222) have "Ghee Roast" and must both return a hit
+        assert "11111" in restaurant_ids
+        assert "22222" in restaurant_ids
+
+    async def test_concurrent_fetch_list_variants_correct(self):
+        """list_variants() concurrently fetches menus and still returns all variants."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        variants = await service.list_variants("ghee roast", WORK_ADDRESS_ID, category="dosa")
+        names = [v[0] for v in variants]
+        assert "Ghee Roast" in names
+
+    async def test_all_reachable_menus_fetched(self):
+        """Every restaurant that passes the reachable filter gets a menu fetch."""
+        client = _SupersetDosaClient()
+        service = CandidateService(client)
+        # No restaurant_name filter → both 33333 and 44444 are reachable
+        await service.find("dosa", WORK_ADDRESS_ID, category="dosa")
+        menu_calls = [c for c in client.calls if c[0] == "get_restaurant_menu"]
+        fetched_ids = {c[1][0] for c in menu_calls}
+        assert "33333" in fetched_ids
+        assert "44444" in fetched_ids
+
+
+# ── Change 4: has_variants / has_addons flags ────────────────────────────────────────────
+
+class TestMenuItemFlags:
+    """MenuItem.has_variants / has_addons are parsed from raw menu entries."""
+
+    def test_parse_menu_items_reads_has_variants_flag(self):
+        from swiggy_deal_finder.swiggy_client import parse_menu_items
+        raw = [
+            {"id": "1", "name": "Ghee Dosa", "price": 95, "inStock": 1, "hasVariants": True},
+            {"id": "2", "name": "Plain Dosa", "price": 50, "inStock": 1},
+        ]
+        items = parse_menu_items(raw)
+        by_id = {it.id: it for it in items}
+        assert by_id["1"].has_variants is True
+        assert by_id["2"].has_variants is False  # missing → default False
+
+    def test_parse_menu_items_reads_has_addons_flag(self):
+        from swiggy_deal_finder.swiggy_client import parse_menu_items
+        raw = [
+            {"id": "1", "name": "Masala Dosa", "price": 90, "inStock": 1, "hasAddons": True},
+            {"id": "2", "name": "Plain Dosa", "price": 50, "inStock": 1},
+        ]
+        items = parse_menu_items(raw)
+        by_id = {it.id: it for it in items}
+        assert by_id["1"].has_addons is True
+        assert by_id["2"].has_addons is False
+
+    def test_parse_menu_items_tolerates_missing_flags(self):
+        """Neither hasVariants nor hasAddons is required; both default to False."""
+        from swiggy_deal_finder.swiggy_client import parse_menu_items
+        raw = [{"id": "1", "name": "A", "price": 50, "inStock": 1}]
+        items = parse_menu_items(raw)
+        assert items[0].has_variants is False
+        assert items[0].has_addons is False
+
+
+class TestListVariantsHasOptions:
+    """list_variants() returns 4-tuples; 4th element signals size/add-on options."""
+
+    async def test_list_variants_returns_four_tuples(self):
+        """Each element of list_variants result must be a 4-tuple."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        variants = await service.list_variants("dosa", WORK_ADDRESS_ID)
+        for v in variants:
+            assert len(v) == 4, f"Expected 4-tuple, got {len(v)}-tuple: {v}"
+
+    async def test_has_options_true_for_flagged_item(self):
+        """When a matched item has has_variants=True or has_addons=True,
+        the 4th tuple element must be True for that variant name."""
+        client = _SupersetDosaClient()
+        service = CandidateService(client)
+        # MENU_33333 has "Ghee Dosa Special" with has_variants=True
+        variants = await service.list_variants("ghee dosa", WORK_ADDRESS_ID, category="dosa")
+        by_name = {v[0]: v[3] for v in variants}
+        assert by_name.get("Ghee Dosa Special") is True
+
+    async def test_has_options_false_for_plain_item(self):
+        """Items without variant/add-on flags produce has_options=False."""
+        client = _SupersetDosaClient()
+        service = CandidateService(client)
+        variants = await service.list_variants("ghee dosa", WORK_ADDRESS_ID, category="dosa")
+        by_name = {v[0]: v[3] for v in variants}
+        # "Ghee Podi Dosa" has no special flags → has_options=False
+        assert by_name.get("Ghee Podi Dosa") is False
+
+    async def test_existing_price_range_still_correct_in_four_tuple(self):
+        """Extending to 4-tuple must not disturb the (name, min, max) values."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        variants = await service.list_variants("dosa", WORK_ADDRESS_ID)
+        by_name = {v[0]: (v[1], v[2]) for v in variants}
+        assert by_name["Plain Dosa"] == (50, 50)
+        assert by_name["Ghee Dosa"] == (95, 95)

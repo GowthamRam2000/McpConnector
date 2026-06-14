@@ -2,7 +2,7 @@
 
 Flow: _search_terms(dish, category) → try each term with search_restaurants
       → filter ≤max_distance_km + open (stop at first term yielding ≥1 restaurant)
-      → get_restaurant_menu per candidate → match FULL dish tokens in item name
+      → get_restaurant_menu per candidate (concurrent, bounded) → match dish tokens
       → choose lowest-price match per restaurant → DishHit.
 
 Why _search_terms exists: Swiggy's search_restaurants is DUAL-BEHAVIOR.
@@ -18,8 +18,14 @@ Biryani/briyani: the spec-confirmed spelling variant handled by token normalisat
 (both "biryani" and "briyani" canonicalize to "biryani" before matching).
 """
 
+import asyncio
+
 from swiggy_deal_finder.models import DishHit, MenuItem, Portion
 from swiggy_deal_finder.swiggy_client import SwiggyClient
+
+# Cap concurrent menu fetches to stay well under Swiggy's read-rate limit (~120/min).
+# Read-only menu fetches are independent and idempotent, safe to run concurrently.
+MENU_FETCH_CONCURRENCY = 8
 
 MAX_SEARCH_PAGES = 3
 
@@ -56,6 +62,18 @@ SHRINK_TOKENS: tuple[str, ...] = (
     "2 pcs",
     "4 pcs",
 )
+
+# Generic filler tokens: digits/numerals, punctuation separators, and quantity/style
+# words that add no semantic meaning.  Used by tight matching to allow items like
+# "Ghee Dosa - Plain (2 Nos)" to still be an exact match for "ghee dosa".
+# NO dish-specific or size words here.
+_FILLER_TOKENS: frozenset[str] = frozenset({
+    "nos", "no", "pc", "pcs", "piece", "pieces", "plain", "regular",
+    # Punctuation that str.split() breaks out as standalone tokens
+    "-", "/", "|", "&", "+", "(",  ")",
+    # Single digit tokens that appear as quantity suffixes (e.g. "1", "2")
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "0",
+})
 
 
 def _normalise(text: str) -> str:
@@ -99,6 +117,23 @@ def _matches(query_tokens: list[str], item: MenuItem) -> bool:
     """Return True if every query token appears in the normalised item name."""
     item_tokens = _normalise(item.name).split()
     return all(qt in item_tokens for qt in query_tokens)
+
+
+def _is_tight_match(query_tokens: list[str], item: MenuItem) -> bool:
+    """Return True if the item is a tight like-for-like match for the query.
+
+    Tight = matches all query tokens AND has no extra meaningful tokens beyond the
+    query (ignoring generic FILLER tokens like "plain", "nos", "pcs", digits).
+    This prevents "Ghee Podi Dosa" from matching a search for "Ghee Dosa" because
+    "podi" is a meaningful extra token.
+    """
+    if not _matches(query_tokens, item):
+        return False
+    item_tokens = set(_normalise(item.name).split())
+    query_set = set(query_tokens)
+    # Extra tokens = item tokens not in query and not in filler set
+    extra = item_tokens - query_set - _FILLER_TOKENS
+    return len(extra) == 0
 
 
 def _is_ingredient(normalised_name: str) -> bool:
@@ -192,6 +227,7 @@ class CandidateService:
         portion: Portion = "regular",
         category: str | None = None,
         min_rating: float | None = None,
+        restaurant_name: str | None = None,
     ) -> list[DishHit]:
         """Return one DishHit per restaurant that has a matching, in-stock item.
 
@@ -202,48 +238,90 @@ class CandidateService:
         `portion`): "regular" excludes shrink-sized items unless the query asks for
         them, "mini" keeps only shrink-sized items, "any" disables the portion filter.
 
+        Tight matching: per-restaurant best matches are selected via tight like-for-like
+        matching (no extra meaningful tokens beyond the query).  If at least one tight
+        match exists across all restaurants, only tight matches are returned.  When zero
+        tight matches are found anywhere, falls back to loose (superset) matching so the
+        user still gets results.
+
         category: broad food category for the restaurant search (e.g. "dosa" when
         dish is "ghee roast").  When omitted, the full dish is tried first, then the
         last token as a fallback.  See _search_terms for the full priority order.
+        restaurant_name: when given, only restaurants whose name contains this string
+        (case-insensitive substring) are probed; menus for others are never fetched.
+        None = no filter (default).
         """
         reachable = _prune(
             await self._find_reachable(dish, address_id, category), min_rating
         )
 
+        # Filter to a named restaurant before fetching menus (saves MCP calls).
+        if restaurant_name is not None:
+            needle = restaurant_name.lower()
+            reachable = [r for r in reachable if needle in r.name.lower()]
+
         query_normalised = _normalise(dish)
         query_tokens = query_normalised.split()
-        hits: list[DishHit] = []
 
-        for restaurant in reachable:
-            items = await self._client.get_restaurant_menu(restaurant.id, address_id)
-            best = _best_match(
+        # Fetch all menus concurrently; gather preserves input order for determinism.
+        sem = asyncio.Semaphore(MENU_FETCH_CONCURRENCY)
+
+        async def _fetch(restaurant_id: str) -> list[MenuItem]:
+            async with sem:
+                return await self._client.get_restaurant_menu(restaurant_id, address_id)
+
+        menus = await asyncio.gather(*(_fetch(r.id) for r in reachable))
+
+        # Collect best matches under TIGHT matching first; fall back to loose if none.
+        tight_hits: list[DishHit] = []
+        loose_hits: list[DishHit] = []
+
+        for restaurant, items in zip(reachable, menus, strict=True):
+            # Tight best match: same filters as _best_match but requires _is_tight_match.
+            tight_candidates = [
+                it for it in items
+                if it.in_stock
+                and _is_tight_match(query_tokens, it)
+                and not _is_ingredient(_normalise(it.name))
+                and _passes_portion_filter(_normalise(it.name), portion, query_normalised)
+            ]
+            if tight_candidates:
+                best_tight = min(tight_candidates, key=lambda it: it.price)
+                tight_hits.append(DishHit(
+                    restaurant=restaurant,
+                    item_id=best_tight.id,
+                    item_name=best_tight.name,
+                    base_price=best_tight.price,
+                ))
+
+            loose_best = _best_match(
                 query_tokens, items, portion=portion, query_normalised=query_normalised
             )
-            if best is None:
-                continue
-            hits.append(
-                DishHit(
+            if loose_best is not None:
+                loose_hits.append(DishHit(
                     restaurant=restaurant,
-                    item_id=best.id,
-                    item_name=best.name,
-                    base_price=best.price,
-                )
-            )
+                    item_id=loose_best.id,
+                    item_name=loose_best.name,
+                    base_price=loose_best.price,
+                ))
 
-        return hits
+        # Global fallback: use tight results when any tight match exists; else loose.
+        return tight_hits if tight_hits else loose_hits
 
     async def list_variants(
         self,
         dish: str,
         address_id: str,
         category: str | None = None,
-    ) -> list[tuple[str, int, int]]:
-        """Return distinct dish variant names with min/max prices across restaurants.
+    ) -> list[tuple[str, int, int, bool]]:
+        """Return distinct dish variant names with min/max prices and options flag.
 
-        Searches ≤max_distance_km open restaurants, fetches menus, collects items
-        matching the dish tokens with the INGREDIENT DENYLIST applied (no portion filter
-        — all sizes shown). Returns up to 20 distinct item names sorted alphabetically,
-        each with (name, min_price, max_price).
+        Searches ≤max_distance_km open restaurants, fetches menus (concurrently),
+        collects items matching the dish tokens with the INGREDIENT DENYLIST applied
+        (no portion filter — all sizes shown, loose/superset matching — all variants
+        shown so the user can pick).  Returns up to 20 distinct item names sorted
+        alphabetically, each as (name, min_price, max_price, has_options) where
+        has_options=True signals the item has size variants or add-on choices.
 
         category: broad food category for the restaurant search.  See find() for details.
         """
@@ -254,11 +332,20 @@ class CandidateService:
         query_normalised = _normalise(dish)
         query_tokens = query_normalised.split()
 
-        # name → [prices]
+        # name → [prices]; name → has_options (True if any matching item flags variants/addons)
         variant_prices: dict[str, list[int]] = {}
+        variant_has_options: dict[str, bool] = {}
 
-        for restaurant in reachable:
-            items = await self._client.get_restaurant_menu(restaurant.id, address_id)
+        # Read-only menu fetches are independent; run them concurrently.
+        sem = asyncio.Semaphore(MENU_FETCH_CONCURRENCY)
+
+        async def _fetch(restaurant_id: str) -> list[MenuItem]:
+            async with sem:
+                return await self._client.get_restaurant_menu(restaurant_id, address_id)
+
+        all_menus = await asyncio.gather(*(_fetch(r.id) for r in reachable))
+
+        for items in all_menus:
             for it in items:
                 if not it.in_stock:
                     continue
@@ -271,10 +358,14 @@ class CandidateService:
                 # but store the original name for display (first seen wins).
                 if it.name not in variant_prices:
                     variant_prices[it.name] = []
+                    variant_has_options[it.name] = False
                 variant_prices[it.name].append(it.price)
+                # Accumulate: once True, always True (any matching item triggers flag)
+                if it.has_variants or it.has_addons:
+                    variant_has_options[it.name] = True
 
         results = [
-            (name, min(prices), max(prices))
+            (name, min(prices), max(prices), variant_has_options[name])
             for name, prices in variant_prices.items()
         ]
         results.sort(key=lambda t: t[0])

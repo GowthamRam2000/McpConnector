@@ -80,7 +80,45 @@ MENU_22222 = [
     MenuItem(id="e002", name="Ghee Roast", price=130, in_stock=True),
 ]
 
-# Menus keyed by restaurant_id
+# ── Dosa superset fixture: multiple item names that all CONTAIN "ghee dosa" tokens ──
+# Used to test tight like-for-like matching in find() vs loose matching in list_variants().
+# "Ghee Dosa" is the exact match; the others are supersets (contain extra meaningful tokens).
+RESTAURANT_DOSA3 = Restaurant(
+    id="33333",
+    name="A2B - Adyar Ananda Bhavan",
+    distance_km=1.0,
+    avg_rating=4.3,
+    is_open=True,
+)
+
+RESTAURANT_DOSA4 = Restaurant(
+    id="44444",
+    name="Sri Murugan Dosa Corner",
+    distance_km=3.2,
+    avg_rating=4.1,
+    is_open=True,
+)
+
+# Menu with exact "Ghee Dosa" plus superset names for tight-match testing
+MENU_33333 = [
+    MenuItem(id="f001", name="Ghee Dosa", price=95, in_stock=True),
+    MenuItem(id="f002", name="Ghee Podi Dosa", price=110, in_stock=True),
+    MenuItem(id="f003", name="Millet Ghee Karam Dosa", price=120, in_stock=True),
+    MenuItem(id="f004", name="Nice Ghee Dosa", price=100, in_stock=True),
+    # "Ghee Dosa - Plain" — "plain" is a FILLER token, so this is tight-eligible
+    MenuItem(id="f005", name="Ghee Dosa - Plain", price=90, in_stock=True),
+    # variant/add-on flags for Change 4 testing
+    MenuItem(id="f006", name="Ghee Dosa Special", price=130, in_stock=True,
+             has_variants=True, has_addons=False),
+]
+
+# Menu for a restaurant that has NO exact ghee dosa — only supersets
+MENU_44444 = [
+    MenuItem(id="g001", name="Ghee Podi Dosa", price=105, in_stock=True),
+    MenuItem(id="g002", name="Nice Ghee Dosa", price=98, in_stock=True),
+]
+
+# Menus keyed by restaurant_id (populated further below for dosa superset restaurants)
 MENU_62683 = [
     MenuItem(id="81574197", name="Chicken Briyani", price=350, in_stock=True),
     MenuItem(id="81574198", name="Mutton Biryani", price=450, in_stock=True),
@@ -89,7 +127,14 @@ MENUS: dict[str, list[MenuItem]] = {
     "62683": MENU_62683,
     "11111": MENU_11111,
     "22222": MENU_22222,
+    "33333": MENU_33333,
+    "44444": MENU_44444,
 }
+
+# Extended page-0 for tight-match and restaurant_name-filter tests:
+# includes the A2B restaurant (33333) and a second superset restaurant (44444).
+# Defined after the restaurants because Python evaluates list literals eagerly.
+DOSA_SUPERSET_PAGE0 = [RESTAURANT_DOSA3, RESTAURANT_DOSA4]
 
 # ── Cart state machine ──────────────────────────────────────────────────────────────────
 # Tracks cart state inside FakeSwiggyClient:
@@ -150,6 +195,9 @@ class FakeSwiggyClient:
     _SPECIFIC_PHRASES: frozenset[str] = frozenset(
         {"ghee roast", "ghee dosa", "masala dosa", "roast"}
     )
+
+    # Extra dosa restaurants (33333, 44444) exposed via DOSA_SUPERSET_RESTAURANTS_PAGE0
+    # so tight-match and restaurant_name-filter tests can inject them via subclassing.
 
     async def search_restaurants(
         self, query: str, address_id: str, offset: int = 0

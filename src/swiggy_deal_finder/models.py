@@ -34,6 +34,9 @@ class MenuItem(BaseModel, frozen=True):
     price: int
     # inStock comes as 0/1 from MCP; validator coerces via pydantic int→bool
     in_stock: bool
+    # hasVariants / hasAddons from Swiggy menu; default False (tolerant — missing → False)
+    has_variants: bool = False
+    has_addons: bool = False
 
 
 class DishHit(BaseModel, frozen=True):

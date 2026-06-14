@@ -21,7 +21,7 @@ class TestListDishVariantsFormatting:
             output = f"No variants found for '{dish}' within 7 km."
         else:
             lines = [f"Variants of '{dish}' available nearby:"]
-            for name, lo, hi in variants:
+            for name, lo, hi, _has_options in variants:
                 lines.append(f"  - {name}  (₹{lo}–{hi})")
             lines.append(
                 "Ask the user which specific one to compare, then call find_deals with that name."

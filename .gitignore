@@ -19,3 +19,5 @@ gha-creds-*.json
 
 # IDE
 .idea/
+.claude/
+.docs/

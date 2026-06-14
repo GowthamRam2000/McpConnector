@@ -36,6 +36,7 @@ class DealFinder:
         portion: str = "regular",
         category: str | None = None,
         min_rating: float | None = None,
+        restaurant_name: str | None = None,
     ) -> list[PricedOption]:
         """Return up to top_n PricedOptions for dish, ranked cheapest-first.
 
@@ -50,6 +51,8 @@ class DealFinder:
         category: broad food category for restaurant search (e.g. "dosa" for "ghee roast").
         min_rating: optional USER-supplied rating floor; restaurants below it are excluded
         (unrated kept). None = no filter.
+        restaurant_name: optional chain/restaurant name substring to narrow results to one
+        restaurant (case-insensitive). None = no filter.
         See CandidateService.find for details.
         """
         # Fail fast on a busy cart before doing any search/pricing work.
@@ -60,7 +63,8 @@ class DealFinder:
             )
 
         hits = await self._candidates.find(  # type: ignore[arg-type]
-            dish, address_id, portion=portion, category=category, min_rating=min_rating
+            dish, address_id, portion=portion, category=category, min_rating=min_rating,
+            restaurant_name=restaurant_name,
         )
         # Sort by base_price asc before slicing so we probe cheapest options first.
         hits_sorted = sorted(hits, key=lambda h: h.base_price)

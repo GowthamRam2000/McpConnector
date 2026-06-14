@@ -112,6 +112,7 @@ def parse_menu_items(raw: list[dict[str, Any]]) -> list[MenuItem]:
     """Map raw get_restaurant_menu items to MenuItem models.
 
     inStock is 0/1 in the MCP response; absent key defaults to 1 (in-stock).
+    hasVariants / hasAddons default to False when absent (tolerant — new fields).
     """
     results: list[MenuItem] = []
     for entry in raw:
@@ -123,6 +124,8 @@ def parse_menu_items(raw: list[dict[str, Any]]) -> list[MenuItem]:
                     name=str(entry["name"]),
                     price=int(entry["price"]),
                     in_stock=in_stock,
+                    has_variants=bool(entry.get("hasVariants", False)),
+                    has_addons=bool(entry.get("hasAddons", False)),
                 )
             )
         except (KeyError, TypeError, ValueError):

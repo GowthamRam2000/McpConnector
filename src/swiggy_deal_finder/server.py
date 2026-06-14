@@ -102,6 +102,7 @@ async def find_deals(
     portion: str = "regular",
     category: str | None = None,
     min_rating: float | None = None,
+    restaurant_name: str | None = None,
 ) -> str:
     """Find the cheapest nearby Swiggy options for a dish after coupons are applied.
 
@@ -131,6 +132,13 @@ async def find_deals(
         ASK the user what minimum rating they want and pass their answer here. NEVER
         assume or hardcode a default. Leave as None only if the user has no preference;
         a floor also reduces how many restaurants are probed (faster results).
+    restaurant_name:
+        Optional restaurant or chain name to narrow results to one outlet, e.g. "A2B"
+        or "Saravana". Case-insensitive substring match against restaurant names.
+        If no result is returned, retry with the chain's FULL brand name or an alternate
+        spelling (e.g. "A2B" → "Adyar Ananda Bhavan") — chains may be listed under their
+        full name. Only restaurants the category search surfaces (within ~7 km, paginated)
+        can be matched; a specific branch beyond that range will not appear.
 
     Returns a ranked table (cheapest first) with restaurant name, rating, distance,
     base price, best Swiggy coupon applied, and final amount to pay.
@@ -138,22 +146,23 @@ async def find_deals(
     Requires an EMPTY Swiggy cart. If your cart is not empty, this tool will tell
     you so — clear your cart in the Swiggy app and try again.
 
-    IMPORTANT: compare like-for-like. If the user's dish is generic/ambiguous (a family
-    such as 'dosa', 'biryani', 'pizza', 'noodles') rather than a specific item, FIRST
-    call list_dish_variants(dish, address_id), show the user the variants, and ask which
-    specific one they want (including toppings, e.g. plain vs masala vs ghee dosa). Only
-    then call find_deals with that specific dish. Use portion='regular' (default) for a
-    normal portion, 'mini' only if the user explicitly wants a small/mini size.
+    IMPORTANT — ask clarifying questions BEFORE calling find_deals:
+    1. If the dish is a generic family (e.g. 'dosa', 'biryani', 'pizza', 'noodles'),
+       FIRST call list_dish_variants(dish, address_id), show the variants, and ask the
+       user which specific one they want. Only then call find_deals with that specific dish.
+    2. If the chosen variant is flagged "has size/add-on options" in the list_dish_variants
+       result, ASK AS MANY CLARIFYING QUESTIONS AS NEEDED about the exact size, toppings,
+       and add-ons BEFORE calling find_deals — never guess toppings or portion sizes.
 
     Typical flow: call get_locations() first → pick address_id → for ambiguous dishes
-    call list_dish_variants() first → then call find_deals() with the specific variant.
+    call list_dish_variants() first → clarify size/add-ons if flagged → then find_deals.
     """
     client = _require_client()
     finder = DealFinder(client)
     try:
         options = await finder.find_deals(
             dish=dish, address_id=address_id, top_n=top_n, portion=portion,
-            category=category, min_rating=min_rating,
+            category=category, min_rating=min_rating, restaurant_name=restaurant_name,
         )
     except CartNotEmptyError:
         return (
@@ -220,8 +229,11 @@ async def list_dish_variants(
         before telling the user it's unavailable.
 
     Returns a list of distinct dish variants with price ranges, ready to show the user.
-    After showing this list, ask the user which specific variant to compare, then call
-    find_deals with that specific dish name.
+    IMPORTANT — ASK AS MANY CLARIFYING QUESTIONS AS NEEDED: show this list to the user
+    and ask which specific variant they want. If any variant is flagged
+    "has size/add-on options", also ask the user to specify their exact size, toppings,
+    and add-ons BEFORE calling find_deals — never guess these details.
+    Only then call find_deals with the fully-specified dish name.
     """
     client = _require_client()
     service = CandidateService(client)
@@ -232,8 +244,9 @@ async def list_dish_variants(
             "Try a broader search term or a different address."
         )
     lines = [f"Variants of '{dish}' available nearby:"]
-    for name, lo, hi in variants:
-        lines.append(f"  - {name}  (₹{lo}–{hi})")
+    for name, lo, hi, has_options in variants:
+        suffix = "  — has size/add-on options" if has_options else ""
+        lines.append(f"  - {name}  (₹{lo}–{hi}){suffix}")
     lines.append(
         "Ask the user which specific one to compare, then call find_deals with that name."
     )
