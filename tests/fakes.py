@@ -245,6 +245,17 @@ class FakeSwiggyClient:
             self._cart_state = _CART_EMPTY
         return {}
 
+    async def update_food_cart_items(
+        self,
+        restaurant_id: str,
+        address_id: str,
+        items: list[tuple[str, int]],
+    ) -> dict:
+        self._record("update_food_cart_items", restaurant_id, address_id, items)
+        # Any non-zero line makes the cart non-empty; filler tests subclass for real pricing.
+        self._cart_state = _CART_AFTER_ADD if items else _CART_EMPTY
+        return {}
+
     async def apply_coupon(self, coupon_code: str, address_id: str) -> None:
         self._record("apply_coupon", coupon_code, address_id)
         # Returns {} in real MCP; side-effect: mark coupon applied

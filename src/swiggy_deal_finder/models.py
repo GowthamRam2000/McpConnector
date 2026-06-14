@@ -56,3 +56,19 @@ class PricedOption(BaseModel, frozen=True):
     # final_to_pay is the cart total for `quantity` items after the coupon (not per-unit).
     final_to_pay: int
     quantity: int = 1
+
+
+class FillerResult(BaseModel, frozen=True):
+    """A cart-filler plan: the dish plus the cheapest add-ons needed to reach a coupon's
+    minimum cart, with the realised post-coupon bill."""
+
+    dish_name: str
+    dish_price: int
+    # (name, unit_price, quantity) for each filler line added to reach the min-cart
+    filler: list[tuple[str, int, int]]
+    # dish + filler prices (pre-tax item subtotal we built to clear the threshold)
+    subtotal: int
+    coupon_code: str | None
+    coupon_discount: int
+    # actual cart bill after the coupon (includes taxes/fees); 0-discount ⇒ no coupon
+    final_to_pay: int

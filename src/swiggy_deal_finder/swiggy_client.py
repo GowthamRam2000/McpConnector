@@ -164,6 +164,19 @@ class SwiggyClient(Protocol):
         quantity: int,
     ) -> dict: ...
 
+    async def update_food_cart_items(
+        self,
+        restaurant_id: str,
+        address_id: str,
+        items: list[tuple[str, int]],
+    ) -> dict:
+        """Set the cart to several (menu_item_id, quantity) lines in ONE call.
+
+        Used by the cart-filler to add a dish plus filler items together. Callers
+        start from an empty cart (CartGuard), so the full list defines the cart.
+        """
+        ...
+
     async def apply_coupon(self, coupon_code: str, address_id: str) -> None: ...
 
     async def flush_cart(self) -> None: ...

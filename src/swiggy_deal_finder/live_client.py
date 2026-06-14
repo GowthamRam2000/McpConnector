@@ -226,6 +226,29 @@ class LiveSwiggyClient:
         )
         return raw
 
+    async def update_food_cart_items(
+        self,
+        restaurant_id: str,
+        address_id: str,
+        items: list[tuple[str, int]],
+    ) -> dict:
+        """Set the cart to several (menu_item_id, quantity) lines in one call.
+
+        Sends the full cartItems array so the cart is defined deterministically from an
+        empty start (truth still comes from a subsequent get_food_cart).
+        """
+        raw = await self._call(
+            "update_food_cart",
+            {
+                "restaurantId": restaurant_id,
+                "addressId": address_id,
+                "cartItems": [
+                    {"menu_item_id": mid, "quantity": qty} for mid, qty in items
+                ],
+            },
+        )
+        return raw
+
     async def apply_coupon(self, coupon_code: str, address_id: str) -> None:
         """Apply a coupon code to the current cart.
 
