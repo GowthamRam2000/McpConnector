@@ -27,7 +27,6 @@ class CartSummary(TypedDict):
     items: list[CartItem]
 
 
-# ── Pure parsers ────────────────────────────────────────────────────────────────────────
 
 
 def parse_cart(raw: dict[str, Any]) -> CartSummary:
@@ -83,11 +82,11 @@ def parse_restaurants(raw: list[dict[str, Any]]) -> list[Restaurant]:
         try:
             availability_status = entry.get("availabilityStatus")
             if availability_status is not None:
-                # Live MCP returns a string: "OPEN", "CLOSED", or "UNAVAILABLE"
+                # Live MCP returns a string: "OPEN", "CLOSED", or "UNAVAILABLE".
                 is_open: bool = availability_status == "OPEN"
             else:
                 availability = entry.get("availability", {}) or {}
-                # opened key may be missing; default True per documented assumption
+                # opened key may be missing; default True per documented assumption.
                 is_open = bool(availability.get("opened", True))
             avg_rating_raw = entry.get("avgRating")
             avg_rating: float | None = (
@@ -133,9 +132,6 @@ def parse_menu_items(raw: list[dict[str, Any]]) -> list[MenuItem]:
     return results
 
 
-# ── Protocol ────────────────────────────────────────────────────────────────────────────
-
-
 class SwiggyClient(Protocol):
     """Async interface for all Swiggy MCP interactions.
 
@@ -145,7 +141,9 @@ class SwiggyClient(Protocol):
 
     async def get_addresses(self) -> list[Address]: ...
 
-    async def search_restaurants(self, query: str, address_id: str) -> list[Restaurant]: ...
+    async def search_restaurants(
+        self, query: str, address_id: str, offset: int = 0
+    ) -> list[Restaurant]: ...
 
     async def get_restaurant_menu(
         self, restaurant_id: str, address_id: str

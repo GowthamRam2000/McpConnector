@@ -50,7 +50,20 @@ RESTAURANT_DOSA = Restaurant(
     is_open=True,
 )
 
-DOSA_RESTAURANTS = [RESTAURANT_DOSA]
+RESTAURANT_DOSA2 = Restaurant(
+    id="22222",
+    name="Murugan Idli Shop",
+    distance_km=2.8,
+    avg_rating=4.5,
+    is_open=True,
+)
+
+# Page-0 and page-1 slices for the "dosa" search term (page size = 10)
+DOSA_RESTAURANTS_PAGE0 = [RESTAURANT_DOSA]
+DOSA_RESTAURANTS_PAGE1 = [RESTAURANT_DOSA2]
+
+# Legacy alias kept so existing code that references DOSA_RESTAURANTS still compiles.
+DOSA_RESTAURANTS = DOSA_RESTAURANTS_PAGE0
 
 MENU_11111 = [
     MenuItem(id="d001", name="Plain Dosa", price=50, in_stock=True),
@@ -62,6 +75,11 @@ MENU_11111 = [
     MenuItem(id="d007", name="Ghee Roast", price=110, in_stock=True),
 ]
 
+MENU_22222 = [
+    MenuItem(id="e001", name="Paper Dosa", price=60, in_stock=True),
+    MenuItem(id="e002", name="Ghee Roast", price=130, in_stock=True),
+]
+
 # Menus keyed by restaurant_id
 MENU_62683 = [
     MenuItem(id="81574197", name="Chicken Briyani", price=350, in_stock=True),
@@ -70,6 +88,7 @@ MENU_62683 = [
 MENUS: dict[str, list[MenuItem]] = {
     "62683": MENU_62683,
     "11111": MENU_11111,
+    "22222": MENU_22222,
 }
 
 # ── Cart state machine ──────────────────────────────────────────────────────────────────
@@ -132,16 +151,26 @@ class FakeSwiggyClient:
         {"ghee roast", "ghee dosa", "masala dosa", "roast"}
     )
 
-    async def search_restaurants(self, query: str, address_id: str) -> list[Restaurant]:
-        self._record("search_restaurants", query, address_id)
+    async def search_restaurants(
+        self, query: str, address_id: str, offset: int = 0
+    ) -> list[Restaurant]:
+        self._record("search_restaurants", query, address_id, offset=offset)
         q = query.lower().strip()
         # Specific phrases yield no restaurants (live Swiggy returns dish-suggestions only)
         if q in self._SPECIFIC_PHRASES:
             return []
         if "biryani" in q or "briyani" in q:
-            return list(BIRYANI_RESTAURANTS)
+            # Only page 0 has results; subsequent pages are empty.
+            if offset == 0:
+                return list(BIRYANI_RESTAURANTS)
+            return []
         if q == "dosa":
-            return list(DOSA_RESTAURANTS)
+            # Paginated: page 0 → RESTAURANT_DOSA, page 1 → RESTAURANT_DOSA2, page 2+ → []
+            if offset == 0:
+                return list(DOSA_RESTAURANTS_PAGE0)
+            if offset == 10:
+                return list(DOSA_RESTAURANTS_PAGE1)
+            return []
         return []
 
     async def get_restaurant_menu(

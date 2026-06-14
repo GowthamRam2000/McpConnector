@@ -132,7 +132,6 @@ class LiveSwiggyClient:
         text = _extract_text(result)
         return _parse_json(text)
 
-    # ── Read-only Protocol methods ────────────────────────────────────────────────────────
 
     async def get_addresses(self) -> list[Address]:
         """Return the user's saved Swiggy delivery addresses."""
@@ -147,12 +146,18 @@ class LiveSwiggyClient:
             for e in entries
         ]
 
-    async def search_restaurants(self, query: str, address_id: str) -> list[Restaurant]:
+    async def search_restaurants(
+        self, query: str, address_id: str, offset: int = 0
+    ) -> list[Restaurant]:
         """Search for restaurants matching query at address_id.
 
         Live envelope: {"restaurants":[...], "total":N, "query":"..."}
+        offset: page start index (0, 10, 20, …); page size is 10 on the Swiggy side.
         """
-        raw = await self._call("search_restaurants", {"query": query, "addressId": address_id})
+        raw = await self._call(
+            "search_restaurants",
+            {"query": query, "addressId": address_id, "offset": offset},
+        )
         entries: list[dict[str, Any]] = raw.get("restaurants", [])
         return parse_restaurants(entries)
 
@@ -198,7 +203,6 @@ class LiveSwiggyClient:
         raw = await self._call("get_food_cart", {"addressId": address_id})
         return parse_cart(raw)
 
-    # ── Write Protocol methods (no network calls during testing/build) ────────────────────
 
     async def update_food_cart(
         self,

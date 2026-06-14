@@ -13,20 +13,17 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    # ── Swiggy MCP ──
     swiggy_mcp_url: str = ""
     swiggy_oauth_client_id: str = ""
     swiggy_oauth_client_secret: str = ""
     swiggy_oauth_redirect_uri: str = "http://localhost:8000/auth/callback"
 
-    # ── Vertex AI / Gemini (google-genai standard env vars) ──
     google_cloud_project: str = ""
     google_cloud_location: str = "global"
     google_genai_use_vertexai: bool = True
     gemini_model: str = "gemini-3.5-flash"
     google_application_credentials: str = ""
 
-    # ── App ──
     app_secret_key: str
     database_url: str = "sqlite:///./dev.db"
     environment: str = "dev"

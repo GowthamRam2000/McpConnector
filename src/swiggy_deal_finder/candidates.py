@@ -21,13 +21,13 @@ Biryani/briyani: the spec-confirmed spelling variant handled by token normalisat
 from swiggy_deal_finder.models import DishHit, MenuItem, Portion
 from swiggy_deal_finder.swiggy_client import SwiggyClient
 
-# Known alternate spellings that should be treated as the same token.
+MAX_SEARCH_PAGES = 3
+
 _SPELLING_VARIANTS: dict[str, str] = {
     "briyani": "biryani",
 }
 
-# Items whose normalised name contains any of these substrings are groceries/ingredients,
-# not prepared dishes.  Excluded in all portion modes.
+
 INGREDIENT_DENYLIST: tuple[str, ...] = (
     "batter",
     "mix",
@@ -44,7 +44,6 @@ INGREDIENT_DENYLIST: tuple[str, ...] = (
     "masala powder",
 )
 
-# Shrink/portion tokens that indicate a smaller-than-regular serving.
 SHRINK_TOKENS: tuple[str, ...] = (
     "mini",
     "half",
@@ -128,10 +127,8 @@ def _passes_portion_filter(
         return True
     if portion == "mini":
         return _has_shrink_token(normalised_name)
-    # portion == "regular"
     if not _has_shrink_token(normalised_name):
         return True
-    # Item has a shrink token — keep it only if the query also contains that token.
     query_has_shrink = any(token in query_normalised for token in SHRINK_TOKENS)
     return query_has_shrink
 
@@ -165,6 +162,24 @@ def _best_match(
     return min(candidates, key=lambda it: it.price)
 
 
+MAX_MENU_FETCH = 20
+
+
+def _prune(restaurants: list, min_rating: float | None) -> list:
+    """Apply the caller-supplied rating floor (if any), then cap the menu-fetch
+    fan-out to the nearest MAX_MENU_FETCH restaurants (a bandwidth/latency bound).
+
+    The rating floor is a USER preference — we never assume a default here. A
+    restaurant with no rating is kept even when a floor is given (rare; avoids
+    over-pruning new places).
+    """
+    if min_rating is not None:
+        restaurants = [
+            r for r in restaurants if r.avg_rating is None or r.avg_rating >= min_rating
+        ]
+    return sorted(restaurants, key=lambda r: r.distance_km)[:MAX_MENU_FETCH]
+
+
 class CandidateService:
     def __init__(self, client: SwiggyClient, max_distance_km: float = 7.0) -> None:
         self._client = client
@@ -176,6 +191,7 @@ class CandidateService:
         address_id: str,
         portion: Portion = "regular",
         category: str | None = None,
+        min_rating: float | None = None,
     ) -> list[DishHit]:
         """Return one DishHit per restaurant that has a matching, in-stock item.
 
@@ -190,7 +206,9 @@ class CandidateService:
         dish is "ghee roast").  When omitted, the full dish is tried first, then the
         last token as a fallback.  See _search_terms for the full priority order.
         """
-        reachable = await self._find_reachable(dish, address_id, category)
+        reachable = _prune(
+            await self._find_reachable(dish, address_id, category), min_rating
+        )
 
         query_normalised = _normalise(dish)
         query_tokens = query_normalised.split()
@@ -230,6 +248,8 @@ class CandidateService:
         category: broad food category for the restaurant search.  See find() for details.
         """
         reachable = await self._find_reachable(dish, address_id, category)
+        # Scan only the nearest MAX_MENU_FETCH restaurants to bound menu-fetch reads.
+        reachable = sorted(reachable, key=lambda r: r.distance_km)[:MAX_MENU_FETCH]
 
         query_normalised = _normalise(dish)
         query_tokens = query_normalised.split()
@@ -266,17 +286,44 @@ class CandidateService:
         address_id: str,
         category: str | None,
     ) -> list:
-        """Try each search term in priority order; return reachable restaurants from
-        the first term that yields ≥1 reachable (open + within distance) result.
+        """Try each search term in priority order; paginate the first term that
+        yields ≥1 reachable (open + within distance) result on page 0.
+
+        Pagination: for the winning term, fetch offsets 0, 10, 20, … up to
+        MAX_SEARCH_PAGES pages total, or until a page returns 0 restaurants.
+        Results are deduplicated by restaurant id across pages.
 
         Returns [] if no term yields any reachable restaurants.
         """
+        _page_size = 10
+
         for term in _search_terms(dish, category):
-            restaurants = await self._client.search_restaurants(term, address_id)
-            reachable = [
-                r for r in restaurants
+            # --- page 0 probe (also determines if this term is the winner) ---
+            page0 = await self._client.search_restaurants(term, address_id, offset=0)
+            reachable_page0 = [
+                r for r in page0
                 if r.distance_km <= self._max_distance_km and r.is_open
             ]
-            if reachable:
-                return reachable
+            if not reachable_page0:
+                # This term yielded nothing reachable on page 0; try the next term.
+                continue
+
+            # This term is the winner — paginate it.
+            seen_ids: set[str] = {r.id for r in reachable_page0}
+            accumulated = list(reachable_page0)
+
+            for page_num in range(1, MAX_SEARCH_PAGES):
+                offset = page_num * _page_size
+                page = await self._client.search_restaurants(term, address_id, offset=offset)
+                if not page:
+                    # Empty page signals end of results.
+                    break
+                for r in page:
+                    if r.distance_km <= self._max_distance_km and r.is_open:
+                        if r.id not in seen_ids:
+                            seen_ids.add(r.id)
+                            accumulated.append(r)
+
+            return accumulated
+
         return []

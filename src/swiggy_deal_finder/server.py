@@ -101,6 +101,7 @@ async def find_deals(
     top_n: int = 5,
     portion: str = "regular",
     category: str | None = None,
+    min_rating: float | None = None,
 ) -> str:
     """Find the cheapest nearby Swiggy options for a dish after coupons are applied.
 
@@ -125,6 +126,11 @@ async def find_deals(
         search returns nothing, infer a DIFFERENT plausible category or a synonym for the
         dish (e.g. "frankie" → "roll"/"wrap", "curd rice" → "south indian") and call again
         before telling the user it's unavailable.
+    min_rating:
+        Minimum acceptable restaurant rating (e.g. 4.0). This is a USER preference —
+        ASK the user what minimum rating they want and pass their answer here. NEVER
+        assume or hardcode a default. Leave as None only if the user has no preference;
+        a floor also reduces how many restaurants are probed (faster results).
 
     Returns a ranked table (cheapest first) with restaurant name, rating, distance,
     base price, best Swiggy coupon applied, and final amount to pay.
@@ -146,7 +152,8 @@ async def find_deals(
     finder = DealFinder(client)
     try:
         options = await finder.find_deals(
-            dish=dish, address_id=address_id, top_n=top_n, portion=portion, category=category
+            dish=dish, address_id=address_id, top_n=top_n, portion=portion,
+            category=category, min_rating=min_rating,
         )
     except CartNotEmptyError:
         return (

@@ -140,7 +140,7 @@ class TestSearchRestaurants:
 
         mock.assert_called_once_with(
             "search_restaurants",
-            {"query": "biryani", "addressId": "cug4elpnnp0lq52vuk10"},
+            {"query": "biryani", "addressId": "cug4elpnnp0lq52vuk10", "offset": 0},
         )
         assert len(results) == 2
 

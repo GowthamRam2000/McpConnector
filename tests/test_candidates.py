@@ -4,6 +4,36 @@ from swiggy_deal_finder.candidates import CandidateService
 from tests.fakes import WORK_ADDRESS_ID, FakeSwiggyClient
 
 
+class TestRatingFilter:
+    async def test_low_rated_restaurant_excluded(self):
+        from swiggy_deal_finder.models import MenuItem, Restaurant
+
+        class _Client(FakeSwiggyClient):
+            async def search_restaurants(self, query, address_id, offset=0):
+                self._record("search_restaurants", query, address_id, offset=offset)
+                if query == "dosa" and offset == 0:
+                    return [
+                        Restaurant(
+                            id="hi", name="Good Dosa", distance_km=1.0,
+                            avg_rating=4.5, is_open=True,
+                        ),
+                        Restaurant(
+                            id="lo", name="Bad Dosa", distance_km=0.5,
+                            avg_rating=3.2, is_open=True,
+                        ),
+                    ]
+                return []
+
+            async def get_restaurant_menu(self, restaurant_id, address_id):
+                self._record("get_restaurant_menu", restaurant_id, address_id)
+                return [MenuItem(id="g", name="Ghee Roast", price=100, in_stock=True)]
+
+        svc = CandidateService(_Client())
+        hits = await svc.find("ghee roast", WORK_ADDRESS_ID, category="dosa", min_rating=4.0)
+        # "lo" (3.2 stars) is excluded despite being closer and having the dish.
+        assert {h.restaurant.id for h in hits} == {"hi"}
+
+
 class TestCandidateServiceFind:
     async def test_returns_dish_hit_for_matching_restaurant(self):
         client = FakeSwiggyClient()
@@ -183,14 +213,15 @@ class TestCategoryRouting:
     """Tests for the search-term resolver and category-based restaurant routing."""
 
     async def test_category_routes_ghee_roast_to_dosa_restaurants(self):
-        """find("ghee roast", category="dosa") must search "dosa", find Saravana Bhavan,
-        and return the Ghee Roast item from its menu."""
+        """find("ghee roast", category="dosa") must search "dosa", find Saravana Bhavan
+        on page 0 and Murugan Idli Shop on page 1 (via pagination), and return
+        Ghee Roast hits from both restaurants."""
         client = FakeSwiggyClient()
         service = CandidateService(client)
         hits = await service.find("ghee roast", WORK_ADDRESS_ID, category="dosa")
-        assert len(hits) == 1
+        restaurant_ids = {h.restaurant.id for h in hits}
+        assert "11111" in restaurant_ids
         assert hits[0].item_name == "Ghee Roast"
-        assert hits[0].restaurant.id == "11111"
 
     async def test_ghee_roast_without_category_returns_empty(self):
         """find("ghee roast") with no category: "ghee roast"→[] and last token
@@ -239,6 +270,82 @@ class TestCategoryRouting:
             c for c in client.calls if c[0] == "search_restaurants"
         ]
         # First tried: "masala dosa" (specific phrase → [])
-        # Second tried: "dosa" (last token → restaurants)
+        # Second tried: "dosa" offset 0 (last token → restaurants, becomes winning term)
         assert search_calls[0][1][0] == "masala dosa"
         assert search_calls[1][1][0] == "dosa"
+
+
+class TestPagination:
+    """Tests for multi-page restaurant discovery in _find_reachable."""
+
+    async def test_pagination_widens_ghee_roast_to_two_restaurants(self):
+        """find("ghee roast", category="dosa") returns Ghee Roast from BOTH restaurants:
+        RESTAURANT_DOSA (page 0) and RESTAURANT_DOSA2 (page 1 offset=10)."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        hits = await service.find("ghee roast", WORK_ADDRESS_ID, category="dosa")
+        restaurant_ids = {h.restaurant.id for h in hits}
+        assert len(hits) == 2
+        assert "11111" in restaurant_ids
+        assert "22222" in restaurant_ids
+
+    async def test_pagination_stops_when_page_returns_empty(self):
+        """Pagination halts as soon as a page returns []; no further calls made.
+
+        "dosa" page 0 → [DOSA], page 1 → [DOSA2], page 2 → [].
+        With MAX_SEARCH_PAGES=3, offset 20 is requested but returns [] so we stop.
+        Assert search_restaurants is not called beyond offset 20."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        await service.find("ghee roast", WORK_ADDRESS_ID, category="dosa")
+        search_calls = [c for c in client.calls if c[0] == "search_restaurants"]
+        offsets = [c[2].get("offset", 0) for c in search_calls]
+        # Offsets tried: 0, 10, 20 (page 2 returns [] → loop breaks after fetching it)
+        assert 0 in offsets
+        assert 10 in offsets
+        # No offset beyond 20 (MAX_SEARCH_PAGES=3 → pages 0,1,2 → offsets 0,10,20)
+        assert all(o <= 20 for o in offsets)
+
+    async def test_pagination_respects_max_search_pages_cap(self):
+        """Even if a page returns restaurants, we stop after MAX_SEARCH_PAGES pages.
+
+        Biryani page 0 returns results; page 1 returns []. We verify offset never
+        exceeds (MAX_SEARCH_PAGES - 1) * 10."""
+        from swiggy_deal_finder.candidates import MAX_SEARCH_PAGES
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        await service.find("biryani", WORK_ADDRESS_ID)
+        search_calls = [c for c in client.calls if c[0] == "search_restaurants"]
+        offsets = [c[2].get("offset", 0) for c in search_calls]
+        max_expected_offset = (MAX_SEARCH_PAGES - 1) * 10
+        assert all(o <= max_expected_offset for o in offsets)
+
+    async def test_dedup_same_restaurant_on_multiple_pages(self):
+        """A restaurant appearing on two pages is counted only once."""
+        from tests.fakes import RESTAURANT_DOSA
+
+        class DuplicatingClient(FakeSwiggyClient):
+            """Returns RESTAURANT_DOSA on both page 0 and page 1."""
+            async def search_restaurants(self, query, address_id, offset=0):
+                self._record("search_restaurants", query, address_id, offset=offset)
+                if query == "dosa":
+                    if offset <= 10:
+                        return [RESTAURANT_DOSA]
+                    return []
+                return []
+
+        client = DuplicatingClient()
+        service = CandidateService(client)
+        hits = await service.find("ghee roast", WORK_ADDRESS_ID, category="dosa")
+        restaurant_ids = [h.restaurant.id for h in hits]
+        # id "11111" should appear only once despite being on two pages
+        assert restaurant_ids.count("11111") == 1
+
+    async def test_biryani_still_single_page_result(self):
+        """Biryani search: page 0 has results, page 1 returns [] → stops. Single hit."""
+        client = FakeSwiggyClient()
+        service = CandidateService(client)
+        hits = await service.find("biryani", WORK_ADDRESS_ID)
+        # Only RESTAURANT_AMBUR passes the distance/open filter
+        assert len(hits) == 1
+        assert hits[0].restaurant.id == "62683"
