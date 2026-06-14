@@ -25,6 +25,9 @@ class Restaurant(BaseModel, frozen=True):
     # is_open inferred from availability flags; default True when flag absent (optimistic;
     # logged at call site so callers can warn if they want stricter behaviour)
     is_open: bool
+    # Headline offer string from search (e.g. "₹125 OFF ABOVE ₹249"). Surfaced so the
+    # agent can tell the user a min-cart threshold exists and ask about buying more.
+    offer: str | None = None
 
 
 class MenuItem(BaseModel, frozen=True):
@@ -50,4 +53,6 @@ class PricedOption(BaseModel, frozen=True):
     hit: DishHit
     coupon_code: str | None
     coupon_discount: int
+    # final_to_pay is the cart total for `quantity` items after the coupon (not per-unit).
     final_to_pay: int
+    quantity: int = 1

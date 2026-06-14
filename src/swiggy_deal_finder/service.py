@@ -37,6 +37,8 @@ class DealFinder:
         category: str | None = None,
         min_rating: float | None = None,
         restaurant_name: str | None = None,
+        quantity: int = 1,
+        coupon_codes: list[str] | None = None,
     ) -> list[PricedOption]:
         """Return up to top_n PricedOptions for dish, ranked cheapest-first.
 
@@ -53,6 +55,10 @@ class DealFinder:
         (unrated kept). None = no filter.
         restaurant_name: optional chain/restaurant name substring to narrow results to one
         restaurant (case-insensitive). None = no filter.
+        quantity: how many of the item to price (default 1). A larger quantity can meet a
+        coupon's min-cart threshold — the USER decides this; we never assume more than 1.
+        coupon_codes: optional user-supplied coupon codes to try in addition to Swiggy's
+        single auto-suggested best; the lowest realised price wins.
         See CandidateService.find for details.
         """
         # Fail fast on a busy cart before doing any search/pricing work.
@@ -73,7 +79,9 @@ class DealFinder:
         results: list[PricedOption] = []
         for hit in top_hits:
             try:
-                option = await self._pricer.price(hit, address_id)
+                option = await self._pricer.price(
+                    hit, address_id, quantity=quantity, coupon_codes=coupon_codes
+                )
                 results.append(option)
             except Exception:
                 # A failed candidate should not abort the whole run.

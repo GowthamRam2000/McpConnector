@@ -163,3 +163,156 @@ class TestCouponPricer:
         with pytest.raises(PricingError):
             await pricer.price(_HIT, WORK_ADDRESS_ID)
         assert "flush_cart" in client.call_names()  # cart still cleaned up
+
+
+class TestCouponDiscountGate:
+    """A coupon auto-suggested but not actually applied (discount 0, e.g. min-cart not
+    met) must NOT be reported as applied — final price is the no-coupon amount."""
+
+    async def test_zero_discount_coupon_not_reported(self):
+        from swiggy_deal_finder.swiggy_client import CartSummary
+
+        # After add: coupon "TRYNEW" is suggested but applying it yields discount 0.
+        suggested_no_discount: CartSummary = {
+            "is_empty": False,
+            "to_pay": 200,
+            "coupon_applied": "TRYNEW",
+            "coupon_discount": 0,
+            "items": [{"menu_item_id": "81574197", "name": "Chicken Briyani", "quantity": 1}],
+        }
+
+        class ZeroDiscountClient(FakeSwiggyClient):
+            _n: int = 0
+
+            async def get_food_cart(self, address_id: str) -> CartSummary:
+                self._record("get_food_cart", address_id)
+                if self._n == 0:  # CartGuard entry — must be empty
+                    self._n += 1
+                    return dict(_CART_EMPTY)  # type: ignore[return-value]
+                self._n += 1
+                return dict(suggested_no_discount)  # type: ignore[return-value]
+
+            async def apply_coupon(self, coupon_code: str, address_id: str) -> None:
+                # Real MCP returns {}; here the coupon never actually applies (no discount).
+                self._record("apply_coupon", coupon_code, address_id)
+
+        client = ZeroDiscountClient()
+        pricer = CouponPricer(client)
+        option = await pricer.price(_HIT, WORK_ADDRESS_ID)
+        # We DID try the suggested coupon, but it earned nothing → report no coupon.
+        assert "apply_coupon" in client.call_names()
+        assert option.coupon_code is None
+        assert option.coupon_discount == 0
+        assert option.final_to_pay == 200
+
+
+class TestUserSuppliedCoupons:
+    """find_deals can pass user-known coupon codes; the lowest realised price wins."""
+
+    async def test_user_code_beats_auto_suggested(self):
+        from swiggy_deal_finder.swiggy_client import CartSummary
+
+        base: CartSummary = {
+            "is_empty": False, "to_pay": 400, "coupon_applied": "AUTO",
+            "coupon_discount": 0, "items": [],
+        }
+        after_auto: CartSummary = {
+            "is_empty": False, "to_pay": 350, "coupon_applied": "AUTO",
+            "coupon_discount": 50, "items": [],
+        }
+        after_big: CartSummary = {
+            "is_empty": False, "to_pay": 280, "coupon_applied": "BIG",
+            "coupon_discount": 120, "items": [],
+        }
+
+        class MultiCouponClient(FakeSwiggyClient):
+            _n: int = 0
+            _applied: str | None = None
+
+            async def get_food_cart(self, address_id: str) -> CartSummary:
+                self._record("get_food_cart", address_id)
+                if self._n == 0:
+                    self._n += 1
+                    return dict(_CART_EMPTY)  # type: ignore[return-value]
+                self._n += 1
+                if self._applied == "AUTO":
+                    return dict(after_auto)  # type: ignore[return-value]
+                if self._applied == "BIG":
+                    return dict(after_big)  # type: ignore[return-value]
+                return dict(base)  # type: ignore[return-value]
+
+            async def apply_coupon(self, coupon_code: str, address_id: str) -> None:
+                self._record("apply_coupon", coupon_code, address_id)
+                self._applied = coupon_code
+
+        client = MultiCouponClient()
+        pricer = CouponPricer(client)
+        option = await pricer.price(_HIT, WORK_ADDRESS_ID, coupon_codes=["BIG"])
+        applied = [c[1][0] for c in client.calls if c[0] == "apply_coupon"]
+        assert applied == ["AUTO", "BIG"]  # auto-suggested first, then user code
+        assert option.coupon_code == "BIG"
+        assert option.coupon_discount == 120
+        assert option.final_to_pay == 280
+
+
+class TestQuantityPricing:
+    """Quantity is threaded to the cart; a larger quantity can unlock a min-cart coupon."""
+
+    def _client(self):
+        from swiggy_deal_finder.swiggy_client import CartSummary
+
+        class QuantityClient(FakeSwiggyClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self._qty = 0
+                self._coupon = False
+
+            async def get_food_cart(self, address_id: str) -> CartSummary:
+                self._record("get_food_cart", address_id)
+                if self._qty == 0:  # CartGuard entry — empty
+                    return dict(_CART_EMPTY)  # type: ignore[return-value]
+                item_total = 150 * self._qty
+                # Coupon SAVE needs a 2+ cart (min-cart); applies only then.
+                if self._coupon and self._qty >= 2:
+                    return {  # type: ignore[return-value]
+                        "is_empty": False, "to_pay": item_total - 100,
+                        "coupon_applied": "SAVE", "coupon_discount": 100, "items": [],
+                    }
+                return {  # type: ignore[return-value]
+                    "is_empty": False, "to_pay": item_total,
+                    "coupon_applied": "SAVE", "coupon_discount": 0, "items": [],
+                }
+
+            async def update_food_cart(self, restaurant_id, address_id, menu_item_id, quantity):
+                self._record("update_food_cart", restaurant_id, address_id, menu_item_id, quantity)
+                self._qty = quantity
+                return {}
+
+            async def apply_coupon(self, coupon_code: str, address_id: str) -> None:
+                self._record("apply_coupon", coupon_code, address_id)
+                if coupon_code == "SAVE":
+                    self._coupon = True
+
+            async def flush_cart(self) -> None:
+                self._record("flush_cart")
+                self._qty = 0
+                self._coupon = False
+
+        return QuantityClient()
+
+    async def test_single_item_below_min_cart_gets_no_coupon(self):
+        client = self._client()
+        option = await CouponPricer(client).price(_HIT, WORK_ADDRESS_ID, quantity=1)
+        assert option.quantity == 1
+        assert option.coupon_code is None
+        assert option.final_to_pay == 150
+
+    async def test_quantity_two_unlocks_coupon(self):
+        client = self._client()
+        option = await CouponPricer(client).price(_HIT, WORK_ADDRESS_ID, quantity=2)
+        add_calls = [c for c in client.calls if c[0] == "update_food_cart"]
+        assert add_calls[0][1][3] == 2  # quantity passed through to the cart
+        assert option.quantity == 2
+        assert option.coupon_code == "SAVE"
+        assert option.coupon_discount == 100
+        assert option.final_to_pay == 200  # 300 − 100, i.e. ₹100 each for two

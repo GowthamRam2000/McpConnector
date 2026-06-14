@@ -103,6 +103,8 @@ async def find_deals(
     category: str | None = None,
     min_rating: float | None = None,
     restaurant_name: str | None = None,
+    quantity: int = 1,
+    coupon_codes: list[str] | None = None,
 ) -> str:
     """Find the cheapest nearby Swiggy options for a dish after coupons are applied.
 
@@ -139,23 +141,40 @@ async def find_deals(
         spelling (e.g. "A2B" → "Adyar Ananda Bhavan") — chains may be listed under their
         full name. Only restaurants the category search surfaces (within ~7 km, paginated)
         can be matched; a specific branch beyond that range will not appear.
+    quantity:
+        How many of the item to price (default 1). Swiggy coupons often need a minimum
+        cart value (e.g. "₹125 OFF ABOVE ₹249"), so a single item may show NO coupon.
+        Do NOT silently increase this — the user may want only one. See the IMPORTANT note.
+    coupon_codes:
+        Optional list of specific coupon codes the USER already knows about (from the
+        Swiggy app, an SMS, etc.). The connector applies each plus Swiggy's auto-best and
+        keeps the lowest price. NOTE: Swiggy's MCP exposes no browsable coupon list, so
+        the connector cannot discover codes on its own — it already auto-applies Swiggy's
+        single best coupon; pass codes here only when the user names them.
 
     Returns a ranked table (cheapest first) with restaurant name, rating, distance,
-    base price, best Swiggy coupon applied, and final amount to pay.
+    base price, the restaurant's headline offer, best Swiggy coupon applied, and final
+    amount to pay (for `quantity` items).
 
     Requires an EMPTY Swiggy cart. If your cart is not empty, this tool will tell
     you so — clear your cart in the Swiggy app and try again.
 
-    IMPORTANT — ask clarifying questions BEFORE calling find_deals:
+    IMPORTANT — ask clarifying questions BEFORE / AFTER calling find_deals:
     1. If the dish is a generic family (e.g. 'dosa', 'biryani', 'pizza', 'noodles'),
        FIRST call list_dish_variants(dish, address_id), show the variants, and ask the
        user which specific one they want. Only then call find_deals with that specific dish.
     2. If the chosen variant is flagged "has size/add-on options" in the list_dish_variants
        result, ASK AS MANY CLARIFYING QUESTIONS AS NEEDED about the exact size, toppings,
        and add-ons BEFORE calling find_deals — never guess toppings or portion sizes.
+    3. If a result shows a headline offer with a minimum (e.g. "₹125 OFF ABOVE ₹249") but
+       NO coupon was applied because the single item is below that minimum, ASK the user
+       whether they'd like to buy a larger quantity (or add items) to unlock the discount —
+       NEVER assume they want more than one. If they agree, call find_deals again with the
+       chosen `quantity`.
 
     Typical flow: call get_locations() first → pick address_id → for ambiguous dishes
-    call list_dish_variants() first → clarify size/add-ons if flagged → then find_deals.
+    call list_dish_variants() first → clarify size/add-ons if flagged → find_deals →
+    if a min-cart offer went unused, ask about quantity and re-run.
     """
     client = _require_client()
     finder = DealFinder(client)
@@ -163,6 +182,7 @@ async def find_deals(
         options = await finder.find_deals(
             dish=dish, address_id=address_id, top_n=top_n, portion=portion,
             category=category, min_rating=min_rating, restaurant_name=restaurant_name,
+            quantity=quantity, coupon_codes=coupon_codes,
         )
     except CartNotEmptyError:
         return (
@@ -183,18 +203,42 @@ async def find_deals(
             "dish, or a different saved address, before concluding it's unavailable."
         )
 
-    header = f"Top {len(options)} deals for '{dish}' (cheapest first after coupons):\n"
+    qty_note = f" (×{quantity})" if quantity != 1 else ""
+    header = (
+        f"Top {len(options)} deals for '{dish}'{qty_note} "
+        "(cheapest first after coupons):\n"
+    )
     rows = [header]
     for i, opt in enumerate(options, 1):
         rest = opt.hit.restaurant
         rating_str = f"{rest.avg_rating:.1f}" if rest.avg_rating is not None else "N/A"
-        coupon_str = f"{opt.coupon_code} (−₹{opt.coupon_discount})" if opt.coupon_code else "none"
+        coupon_str = (
+            f"{opt.coupon_code} (−₹{opt.coupon_discount})" if opt.coupon_code else "none"
+        )
+        item_line = f"\n   Item: {opt.hit.item_name}  Base: ₹{opt.hit.base_price}"
+        if opt.quantity != 1:
+            item_line += f"  ×{opt.quantity} = ₹{opt.hit.base_price * opt.quantity}"
+        offer_line = f"\n   Offer: {rest.offer}" if rest.offer else ""
+        # When a min-cart offer exists but no coupon applied, hint that buying more may
+        # unlock it — the agent should ASK the user, never silently bump the quantity.
+        hint_line = ""
+        if rest.offer and not opt.coupon_code:
+            hint_line = (
+                "\n   ⓘ No coupon applied at this quantity — this restaurant has the "
+                "offer above; ask the user if they want a larger quantity to unlock it."
+            )
+        final_line = f"\n   Final to pay: ₹{opt.final_to_pay}"
+        if opt.quantity != 1:
+            per_unit = opt.final_to_pay / opt.quantity
+            final_line += f" for {opt.quantity}  (≈₹{per_unit:.0f} each)"
         rows.append(
             f"{i}. {rest.name}"
             f"\n   Rating: {rating_str}  Distance: {rest.distance_km:.1f} km"
-            f"\n   Item: {opt.hit.item_name}  Base: ₹{opt.hit.base_price}"
+            f"{item_line}"
+            f"{offer_line}"
             f"\n   Coupon: {coupon_str}"
-            f"\n   Final to pay: ₹{opt.final_to_pay}\n"
+            f"{hint_line}"
+            f"{final_line}\n"
         )
     return "\n".join(rows)
 

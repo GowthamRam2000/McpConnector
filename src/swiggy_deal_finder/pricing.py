@@ -79,45 +79,49 @@ class CartGuard:
 
 
 class CouponPricer:
-    """Prices a single DishHit by running the U2 coupon probe cycle.
+    """Prices a single DishHit by running the coupon probe cycle.
 
-    Cycle (from spec):
-      1. update_food_cart (add 1×) inside a CartGuard (requires empty cart)
-      2. get_food_cart → read auto-suggested coupon_applied
-      3. If coupon suggested: apply_coupon(code) → get_food_cart AGAIN for real to_pay
-         (apply returns {} — never trust it; always re-read)
-      4. Build PricedOption from final cart state
+    Cycle:
+      1. update_food_cart (add `quantity`×) inside a CartGuard (requires empty cart)
+      2. get_food_cart → base to_pay (no coupon yet) + Swiggy's auto-suggested coupon
+      3. For each candidate coupon (the auto-suggested one + any user-supplied codes):
+         apply_coupon(code) → get_food_cart AGAIN for the real to_pay/discount
+         (apply returns {} — never trust it; always re-read). Keep the code that
+         yields the LOWEST to_pay, counting a coupon ONLY when its discount > 0.
+      4. Build PricedOption from the best result
       5. CartGuard.__aexit__ flushes regardless
 
-    Never calls place_food_order.
+    Why discount > 0 gates the coupon: Swiggy auto-suggests a coupon in the cart even
+    when it is NOT actually applied (e.g. a min-cart threshold is not met), reporting
+    coupon_discount=0.  Surfacing that as "coupon applied" would be wrong, so we only
+    credit a coupon that genuinely reduced the bill.
+
+    Swiggy's MCP exposes no browsable coupon list (fetch_food_coupons returns {}), so
+    the only codes we can evaluate are the single auto-suggested best plus codes the
+    user supplies.  Never calls place_food_order.
     """
 
     def __init__(self, client: SwiggyClient) -> None:
         self._client = client
 
-    async def price(self, hit: DishHit, address_id: str) -> PricedOption:
+    async def price(
+        self,
+        hit: DishHit,
+        address_id: str,
+        quantity: int = 1,
+        coupon_codes: list[str] | None = None,
+    ) -> PricedOption:
         async with CartGuard(self._client, address_id):
-            # Add item to cart
+            # Add `quantity` of the item. A larger quantity can meet a coupon's
+            # min-cart threshold — the caller decides quantity (we never assume it).
             await self._client.update_food_cart(
-                hit.restaurant.id, address_id, hit.item_id, 1
+                hit.restaurant.id, address_id, hit.item_id, quantity
             )
 
-            # First cart read: Swiggy auto-suggests the best regular coupon here
+            # First read: base price (no coupon applied yet) + Swiggy's auto-suggestion.
             cart = await self._client.get_food_cart(address_id)
-
-            coupon_code = cart["coupon_applied"]
-            to_pay = cart["to_pay"]
-            coupon_discount = cart["coupon_discount"]
-
-            if coupon_code:
-                # apply_coupon returns {} — its only purpose is to trigger the side-effect.
-                # We re-read immediately; the re-read is the source of truth.
-                await self._client.apply_coupon(coupon_code, address_id)
-                cart = await self._client.get_food_cart(address_id)
-                to_pay = cart["to_pay"]
-                coupon_discount = cart["coupon_discount"]
-
-            if to_pay is None:
+            base_to_pay = cart["to_pay"]
+            if base_to_pay is None:
                 # A populated cart always has to_pay; None means the add/read failed.
                 # Raise so DealFinder skips this candidate instead of surfacing a
                 # ₹0 option that would wrongly rank as the cheapest.
@@ -125,9 +129,38 @@ class CouponPricer:
                     f"no to_pay for {hit.restaurant.id}/{hit.item_id} after add"
                 )
 
+            # Candidate coupons: the auto-suggested best, then any user-supplied codes.
+            candidates: list[str] = []
+            if cart["coupon_applied"]:
+                candidates.append(cart["coupon_applied"])
+            if coupon_codes:
+                candidates.extend(coupon_codes)
+
+            best_code: str | None = None
+            best_discount = 0
+            best_to_pay = base_to_pay
+
+            seen: set[str] = set()
+            for code in candidates:
+                if not code or code in seen:
+                    continue
+                seen.add(code)
+                # apply_coupon returns {} — re-read the cart for the truth.
+                await self._client.apply_coupon(code, address_id)
+                applied = await self._client.get_food_cart(address_id)
+                to_pay = applied["to_pay"]
+                discount = applied["coupon_discount"]
+                if to_pay is not None and discount > 0 and to_pay < best_to_pay:
+                    best_to_pay = to_pay
+                    best_discount = discount
+                    # Attribute the code the cart reports as applied (robust if an
+                    # invalid code silently left a prior coupon in place).
+                    best_code = applied["coupon_applied"] or code
+
             return PricedOption(
                 hit=hit,
-                coupon_code=coupon_code,
-                coupon_discount=coupon_discount,
-                final_to_pay=to_pay,
+                coupon_code=best_code,
+                coupon_discount=best_discount,
+                final_to_pay=best_to_pay,
+                quantity=quantity,
             )

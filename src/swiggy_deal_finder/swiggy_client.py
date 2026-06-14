@@ -92,6 +92,7 @@ def parse_restaurants(raw: list[dict[str, Any]]) -> list[Restaurant]:
             avg_rating: float | None = (
                 float(avg_rating_raw) if avg_rating_raw is not None else None
             )
+            offer_raw = entry.get("offer")
             results.append(
                 Restaurant(
                     id=str(entry["id"]),
@@ -99,6 +100,7 @@ def parse_restaurants(raw: list[dict[str, Any]]) -> list[Restaurant]:
                     distance_km=float(entry["distanceKm"]),
                     avg_rating=avg_rating,
                     is_open=is_open,
+                    offer=str(offer_raw) if offer_raw else None,
                 )
             )
         except (KeyError, TypeError, ValueError):

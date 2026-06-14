@@ -120,6 +120,18 @@ class TestParseRestaurants:
         results = parse_restaurants(raw)
         assert results[0].avg_rating is None
 
+    def test_offer_field_captured(self):
+        """The headline offer string is surfaced so the agent can mention min-cart deals."""
+        raw = [
+            {"id": "1", "name": "A2B", "distanceKm": 3.0, "avgRating": 4.4,
+             "offer": "₹125 OFF ABOVE ₹249"},
+        ]
+        assert parse_restaurants(raw)[0].offer == "₹125 OFF ABOVE ₹249"
+
+    def test_offer_absent_defaults_none(self):
+        raw = [{"id": "1", "name": "X", "distanceKm": 1.0, "avgRating": 4.0}]
+        assert parse_restaurants(raw)[0].offer is None
+
     def test_missing_availability_defaults_open(self):
         """No availability flag → assume open (optimistic; documented assumption)."""
         raw = [{"id": "1", "name": "X", "distanceKm": 1.0, "avgRating": 4.0}]
